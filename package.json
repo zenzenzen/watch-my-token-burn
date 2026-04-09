@@ -1,0 +1,22 @@
+{
+  "name": "token-gauge",
+  "version": "1.0.0",
+  "description": "Superfast terminal dashboard for Claude Code token usage",
+  "type": "module",
+  "bin": {
+    "token-gauge": "./src/main.js",
+    "tg": "./src/main.js"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "dev": "node --watch src/main.js",
+    "test": "node --test",
+    "install:local": "./scripts/install-tg.sh",
+    "install:dry-run": "./scripts/install-tg.sh --dry-run"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["claude", "token", "dashboard", "tui"],
+  "license": "MIT"
+}
