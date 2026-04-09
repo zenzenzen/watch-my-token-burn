@@ -4,9 +4,15 @@ A zero-dependency terminal dashboard that tracks token usage, context window con
 
 ![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen) ![License](https://img.shields.io/badge/license-MIT-blue)
 
-## Why
+## 💸🔥 Why 🔥💸
 
-AI coding assistants burn through tokens fast and the built-in UIs don't make it easy to see where your budget is going. `token-gauge` reads session data directly from `~/.claude/` and `~/.codex/`, then renders live dashboards — fullscreen TUI, compact inline strip, or a status-line hook you can wire into Claude Code or Codex.
+I kept seeing memes about people's API bills looking like mortgage payments and thought "haha, couldn't be me" — and then it was me. I had no idea how fast tokens evaporate until I watched an Opus session mass-produce cache write tokens like it was getting paid by the million. (It was. By me.)
+
+So I built this. Not to stop the bleeding — let's be honest, I'm not going to stop — but to at least watch the money leave in real time with nice color-coded bars, like a gas gauge for my mass burn. It doesn't make it hurt less, but it does make it *aesthetic* 😎💸🔥💰🔥
+
+Anyway, `token-gauge` reads session data directly from `~/.claude/` and `~/.codex/` and renders live dashboards so you too can experience the thrill of watching your context window fill up and your wallet empty out simultaneously.
+
+💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸
 
 ## Features
 
