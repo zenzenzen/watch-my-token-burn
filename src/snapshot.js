@@ -2,7 +2,7 @@ import { collectSessions } from './collector.js';
 import { collectCodexData } from './codex.js';
 import { refreshWeeklyData } from './tracker.js';
 import { MODEL_PRICING } from './pricing.js';
-import { formatModelName, basenameLabel, primaryClaudeSession } from './format.js';
+import { formatModelName, basenameLabel, primaryClaudeSession, normalizeRateLimit } from './format.js';
 
 function getClaudeSessionCost(model, totals) {
   const pricing = MODEL_PRICING[model] || MODEL_PRICING.default;
@@ -16,14 +16,6 @@ function getClaudeSessionCost(model, totals) {
 
 function sum(values) {
   return values.reduce((total, value) => total + (Number(value) || 0), 0);
-}
-
-function normalizeRateLimit(limit, percentKey = 'used_percent') {
-  if (!limit) return null;
-  const usedPercent = limit.used_percentage ?? limit[percentKey] ?? null;
-  const resetsAt = limit.resets_at ?? null;
-  if (usedPercent === null && resetsAt === null) return null;
-  return { usedPercent, resetsAt };
 }
 
 export function createClaudeLocalSnapshot(sessions, weeklyData) {
@@ -113,8 +105,8 @@ export function createCodexLocalSnapshot(codexData) {
     contextWindow: active.modelContextWindow || 0,
     lastTokens: active.lastTokens || 0,
     costUsd: null,
-    primaryLimit: normalizeRateLimit(active.rateLimits?.primary),
-    secondaryLimit: normalizeRateLimit(active.rateLimits?.secondary),
+    primaryLimit: active.rateLimits?.primary ?? null,
+    secondaryLimit: active.rateLimits?.secondary ?? null,
     meta: {
       recentThreads: (codexData?.recentThreads || []).length,
     },

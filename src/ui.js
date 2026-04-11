@@ -335,8 +335,8 @@ function compactCodexSegments(codexData, ascii, budget = 0) {
   const segments = [
     { text: truncateText(active.threadName || active.workspaceLabel || 'Codex', 18, ascii), bg: THEME.bubblegum, fg: THEME.text },
     { text: 'Codex', bg: THEME.ocean, fg: THEME.text },
-    { text: `5h ${formatPercent(primary?.used_percent)}`, bg: THEME.golden, fg: THEME.ink },
-    { text: `7d ${formatPercent(secondary?.used_percent)}`, bg: THEME.emerald, fg: THEME.ink },
+    { text: `5h ${formatPercent(primary?.usedPercent)}`, bg: THEME.golden, fg: THEME.ink },
+    { text: `7d ${formatPercent(secondary?.usedPercent)}`, bg: THEME.emerald, fg: THEME.ink },
     { text: `${formatTokens(active.currentContextTokens)} ctx`, bg: THEME.panelAlt, fg: THEME.text },
     { text: `${formatTokens(active.totalTokens)} tok`, bg: THEME.panelSoft, fg: THEME.text },
     { text: formatCost(cost), bg: THEME.golden, fg: THEME.ink },
@@ -526,11 +526,11 @@ function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii
 
 function renderRateLimitPanel(lines, title, rateLimit, width, colorBg, nowMs) {
   const barWidth = Math.max(20, width - 22);
-  const usedPercent = Math.max(0, Math.min(100, rateLimit?.used_percent || 0));
+  const usedPercent = Math.max(0, Math.min(100, rateLimit?.usedPercent || 0));
   const used = Math.round((usedPercent / 100) * 1000);
   const remaining = 1000 - used;
   lines.push('');
-  lines.push(`  ${C.dim}${title}${C.reset}  ${C.bold}${formatPercent(usedPercent)}${C.reset} ${C.dim}used${C.reset}  ${C.dim}reset in ${formatRelativeReset(rateLimit?.resets_at, nowMs)}${C.reset}`);
+  lines.push(`  ${C.dim}${title}${C.reset}  ${C.bold}${formatPercent(usedPercent)}${C.reset} ${C.dim}used${C.reset}  ${C.dim}reset in ${formatRelativeReset(rateLimit?.resetsAt, nowMs)}${C.reset}`);
   lines.push(`  ${solidBar([
     { value: used, bg: colorBg },
     { value: remaining, bg: C.bgDark },
@@ -542,8 +542,8 @@ function renderCodexSummaryStrip(active, ascii) {
   return renderPowerline([
     { text: truncateText(active.threadName || active.workspaceLabel || 'Codex', 18, ascii), bg: THEME.bubblegum, fg: THEME.text },
     { text: 'Codex', bg: THEME.ocean, fg: THEME.text },
-    { text: `5h ${formatPercent(active.rateLimits?.primary?.used_percent)}`, bg: THEME.golden, fg: THEME.ink },
-    { text: `7d ${formatPercent(active.rateLimits?.secondary?.used_percent)}`, bg: THEME.emerald, fg: THEME.ink },
+    { text: `5h ${formatPercent(active.rateLimits?.primary?.usedPercent)}`, bg: THEME.golden, fg: THEME.ink },
+    { text: `7d ${formatPercent(active.rateLimits?.secondary?.usedPercent)}`, bg: THEME.emerald, fg: THEME.ink },
     { text: `${formatTokens(active.currentContextTokens)} ctx`, bg: THEME.panelAlt, fg: THEME.text },
     { text: `${formatTokens(active.totalTokens)} tok`, bg: THEME.panelSoft, fg: THEME.text },
   ], ascii);

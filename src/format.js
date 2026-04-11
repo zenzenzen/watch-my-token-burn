@@ -21,3 +21,11 @@ export function basenameLabel(path) {
 export function primaryClaudeSession(sessions) {
   return sessions.find(session => session.alive) || sessions[0] || null;
 }
+
+export function normalizeRateLimit(limit, percentKey = 'used_percent') {
+  if (!limit) return null;
+  const usedPercent = limit.used_percentage ?? limit[percentKey] ?? null;
+  const resetsAt = limit.resets_at ?? null;
+  if (usedPercent === null && resetsAt === null) return null;
+  return { usedPercent, resetsAt };
+}
