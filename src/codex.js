@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
-import { basenameLabel } from './format.js';
+import { basenameLabel, normalizeRateLimit } from './format.js';
 
 function resolveCodexPaths(opts = {}) {
   const codexDir = opts.codexDir || join(homedir(), '.codex');
@@ -185,7 +185,12 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
     lastReasoningOutputTokens: lastUsage.reasoning_output_tokens || 0,
     currentContextTokens,
     modelContextWindow: parsed.tokenInfo?.model_context_window || 0,
-    rateLimits: parsed.rateLimits || null,
+    rateLimits: parsed.rateLimits
+      ? {
+          primary: normalizeRateLimit(parsed.rateLimits.primary),
+          secondary: normalizeRateLimit(parsed.rateLimits.secondary),
+        }
+      : null,
     liveDataFound: Boolean(parsed.tokenInfo || parsed.rateLimits),
     filePath,
   };
