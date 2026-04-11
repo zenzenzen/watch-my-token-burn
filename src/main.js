@@ -51,13 +51,13 @@ Common options:
   --provider <name>      Initial provider tab: claude | codex (default: claude)
   --ascii                Force ASCII-safe rendering
   --once                 Print once and exit
-  --watch                Keep refreshing inline mode
   -h, --help             Show this help
 
 Standalone fullscreen options:
   -i, --interval <ms>    Refresh interval in ms (default: 15000)
   --autoclear <min>      Auto-clear stale Claude sessions after N minutes (default: 30)
   --view <mode>          compact | detail (default: compact)
+  --budget <amount>      Set a cash budget in USD to show remaining spend (e.g. --budget 50)
 
 Examples:
   token-gauge
@@ -94,6 +94,7 @@ class FullscreenApp {
     this.provider = config.provider;
     this.viewMode = config.viewMode;
     this.ascii = config.ascii;
+    this.budget = config.budget || 0;
     this.isInteractive = Boolean(process.stdout.isTTY && process.stdin.isTTY);
     this._teardownDone = false;
     this._weeklyCounter = 0;
@@ -132,6 +133,7 @@ class FullscreenApp {
       codexData: this.codexData,
       cols: process.stdout.columns,
       ascii: this.ascii,
+      budget: this.budget,
     });
 
     clearScreen();
@@ -375,6 +377,7 @@ async function main() {
       codexData: app.codexData,
       cols: process.stdout.columns,
       ascii: app.ascii,
+      budget: app.budget,
     }) + '\n');
     return;
   }
