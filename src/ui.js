@@ -80,6 +80,30 @@ const MODEL_PRICING = {
   default: { input: 15, output: 75, cacheRead: 1.875, cacheWrite: 18.75 },
 };
 
+const CODEX_PRICING = {
+  // OpenAI o4-mini pricing per 1M tokens (default for Codex CLI)
+  default: { input: 1.1, output: 4.4, cacheRead: 0.275 },
+};
+
+function getCodexSessionCost(session) {
+  const pricing = CODEX_PRICING.default;
+  return (
+    session.totalInputTokens * pricing.input +
+    session.totalOutputTokens * pricing.output +
+    session.totalCachedInputTokens * pricing.cacheRead
+  ) / 1_000_000;
+}
+
+function getCodexTotalCost(codexData) {
+  if (!codexData) return 0;
+  const pricing = CODEX_PRICING.default;
+  return (
+    (codexData.allTotalInputTokens || 0) * pricing.input +
+    (codexData.allTotalOutputTokens || 0) * pricing.output +
+    (codexData.allTotalCachedInputTokens || 0) * pricing.cacheRead
+  ) / 1_000_000;
+}
+
 function getSessionCost(model, totals) {
   const pricing = MODEL_PRICING[model] || MODEL_PRICING.default;
   return (
@@ -299,51 +323,70 @@ function renderCompactFooter(width) {
   return `  ${C.dim}q:quit  r:refresh  v:view  [:prev  ]:next${C.reset}`;
 }
 
-function compactClaudeSegments(sessions, ascii) {
+function compactClaudeSegments(sessions, ascii, budget = 0, weeklyData = null) {
   const session = primaryClaudeSession(sessions);
   if (!session) return [];
 
   const status = sessionStatus(session);
-  return [
+  const sessionCost = sessions.reduce((sum, s) => sum + getSessionCost(s.model, s.totals), 0);
+  const totalSpend = weeklyData?.estimatedCost ?? sessionCost;
+  const segments = [
     { text: truncateText(session.projectName || 'unknown', 18, ascii), bg: THEME.bubblegum, fg: THEME.text },
     { text: formatModelName(session.model), bg: THEME.ocean, fg: THEME.text },
     { text: `${formatPercent((session.context.total / getContextLimit(session.model)) * 100)} of ${formatTokens(getContextLimit(session.model))}`, bg: THEME.emerald, fg: THEME.ink },
-    { text: formatCost(getSessionCost(session.model, session.totals)), bg: THEME.golden, fg: THEME.ink },
+    { text: formatCost(sessionCost), bg: THEME.golden, fg: THEME.ink },
     { text: status.label, bg: status.color, fg: status.fg },
   ];
+
+  if (budget > 0) {
+    const remaining = budget - totalSpend;
+    segments.push({ text: `${formatCost(remaining)} left`, bg: remaining >= 0 ? THEME.emerald : THEME.bubblegum, fg: THEME.ink });
+  }
+
+  return segments;
 }
 
-function compactCodexSegments(codexData, ascii) {
+function compactCodexSegments(codexData, ascii, budget = 0) {
   const active = codexData?.activeSession;
   if (!active) return [];
 
   const primary = active.rateLimits?.primary;
   const secondary = active.rateLimits?.secondary;
-  return [
+  const cost = getCodexSessionCost(active);
+  const segments = [
     { text: truncateText(active.threadName || active.workspaceLabel || 'Codex', 18, ascii), bg: THEME.bubblegum, fg: THEME.text },
     { text: 'Codex', bg: THEME.ocean, fg: THEME.text },
     { text: `5h ${formatPercent(primary?.used_percent)}`, bg: THEME.golden, fg: THEME.ink },
     { text: `7d ${formatPercent(secondary?.used_percent)}`, bg: THEME.emerald, fg: THEME.ink },
     { text: `${formatTokens(active.currentContextTokens)} ctx`, bg: THEME.panelAlt, fg: THEME.text },
     { text: `${formatTokens(active.totalTokens)} tok`, bg: THEME.panelSoft, fg: THEME.text },
+    { text: formatCost(cost), bg: THEME.golden, fg: THEME.ink },
   ];
+
+  if (budget > 0) {
+    const totalSpend = getCodexTotalCost(codexData);
+    const remaining = budget - totalSpend;
+    segments.push({ text: `${formatCost(remaining)} left`, bg: remaining >= 0 ? THEME.emerald : THEME.bubblegum, fg: THEME.ink });
+  }
+
+  return segments;
 }
 
-function renderCompact(provider, sessions, codexData, width, screenWidth, now, ascii) {
+function renderCompact(provider, sessions, codexData, width, screenWidth, now, ascii, budget = 0, weeklyData = null) {
   const lines = [];
   lines.push('');
   lines.push(renderHeader({ provider, viewMode: 'compact', width, now }));
   lines.push('');
 
   if (provider === 'claude') {
-    const segments = compactClaudeSegments(sessions);
+    const segments = compactClaudeSegments(sessions, ascii, budget, weeklyData);
     if (segments.length === 0) {
       lines.push(`  ${C.dim}No Claude sessions detected.${C.reset}`);
     } else {
       lines.push(`  ${renderPowerline(segments, ascii)}`);
     }
   } else {
-    const segments = compactCodexSegments(codexData);
+    const segments = compactCodexSegments(codexData, ascii, budget);
     if (segments.length === 0) {
       lines.push(`  ${C.dim}No Codex sessions detected.${C.reset}`);
     } else {
@@ -376,7 +419,7 @@ function renderClaudeSummaryStrip(sessions, ascii) {
   ], ascii);
 }
 
-function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii) {
+function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii, budget = 0) {
   const barWidth = Math.max(30, width - 22);
   const lines = [];
   const g = glyphs(ascii);
@@ -439,7 +482,6 @@ function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii
       const ctxPct = formatPercent((session.context.total / contextLimit) * 100);
       lines.push(`  ${C.dim}CONTEXT WINDOW${C.reset}  ${C.bold}${ctxPct}${C.reset} ${C.dim}of ${formatTokens(contextLimit)}${C.reset}  ${C.dim}(${formatTokens(session.context.total)} used, ${formatTokens(remaining)} remaining)${C.reset}`);
       lines.push(`  ${contextBar}`);
-      lines.push(`  ${contextBar}`);
       lines.push('');
       lines.push(`  ${dot(C.bgGrey, `${C.grey}stale ${formatTokens(session.context.stale)}${C.reset}`)}  ${dot(C.bgYellow, `${C.yellow}loaded ${formatTokens(session.context.loaded)}${C.reset}`)}  ${dot(C.bgGreen, `${C.green}active ${formatTokens(session.context.active)}${C.reset}`)}  ${dot(C.bgDark, `${C.dim}free ${formatTokens(remaining)}${C.reset}`)}`);
       lines.push('');
@@ -458,11 +500,20 @@ function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii
       lines.push('');
       lines.push(`  ${C.dim}SESSION TOKENS${C.reset}  ${C.bold}${formatTokens(session.totals.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(in: ${formatTokens(session.totals.totalInput + session.totals.totalCacheRead + session.totals.totalCacheCreate)}  out: ${formatTokens(session.totals.totalOutput)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(cost)}${C.reset}`);
       lines.push(`  ${sessionBar}`);
-      lines.push(`  ${sessionBar}`);
       lines.push('');
       lines.push(`  ${dot(C.bgBlue, `${C.blue}cumulative ${formatTokens(session.totals.totalTokens)}${C.reset}`)}  ${dot(C.bgPurple, `${C.purple}latest turn ${formatTokens(session.totals.latestTotal)}${C.reset}`)}`);
       lines.push('');
     }
+  }
+
+  if (budget > 0) {
+    const sessionCost = sessions.reduce((sum, s) => sum + getSessionCost(s.model, s.totals), 0);
+    const totalSpend = weeklyData?.estimatedCost ?? sessionCost;
+    const remaining = budget - totalSpend;
+    const remainColor = remaining >= 0 ? C.green : C.red;
+    lines.push('');
+    lines.push(`  ${horizontalLine(width - 2)}`);
+    lines.push(`  ${C.bold}${C.cyan}BUDGET${C.reset}  ${C.dim}limit:${C.reset} ${C.bold}${formatCost(budget)}${C.reset}  ${C.dim}spent:${C.reset} ${C.bold}${formatCost(totalSpend)}${C.reset}  ${C.dim}remaining:${C.reset} ${remainColor}${C.bold}${formatCost(remaining)}${C.reset}`);
   }
 
   lines.push('');
@@ -519,7 +570,7 @@ function renderCodexSummaryStrip(active, ascii) {
   ], ascii);
 }
 
-function renderCodexDetail(codexData, width, screenWidth, now, ascii) {
+function renderCodexDetail(codexData, width, screenWidth, now, ascii, budget = 0) {
   const lines = [];
   const active = codexData?.activeSession || null;
   const barWidth = Math.max(30, width - 22);
@@ -565,8 +616,16 @@ function renderCodexDetail(codexData, width, screenWidth, now, ascii) {
     lines.push('');
     lines.push(`  ${dot(C.bgBlue, `${C.blue}cached ${formatTokens(cachedContext)}${C.reset}`)}  ${dot(C.bgGreen, `${C.green}fresh ${formatTokens(freshContext)}${C.reset}`)}  ${dot(C.bgPurple, `${C.purple}out+reason ${formatTokens(outputAccent)}${C.reset}`)}  ${dot(C.bgDark, `${C.dim}free ${formatTokens(remaining)}${C.reset}`)}`);
 
+    const sessionCost = getCodexSessionCost(active);
     lines.push('');
-    lines.push(`  ${C.dim}TOKEN TOTALS${C.reset}  ${C.bold}${formatTokens(active.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(last ${formatTokens(active.lastTokens)}  cache ${formatTokens(active.totalCachedInputTokens)}  out ${formatTokens(active.totalOutputTokens)}  reason ${formatTokens(active.totalReasoningOutputTokens)})${C.reset}`);
+    lines.push(`  ${C.dim}TOKEN TOTALS${C.reset}  ${C.bold}${formatTokens(active.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(last ${formatTokens(active.lastTokens)}  cache ${formatTokens(active.totalCachedInputTokens)}  out ${formatTokens(active.totalOutputTokens)}  reason ${formatTokens(active.totalReasoningOutputTokens)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(sessionCost)}${C.reset}`);
+
+    if (budget > 0) {
+      const totalSpend = getCodexTotalCost(codexData);
+      const remaining = budget - totalSpend;
+      const remainColor = remaining >= 0 ? C.green : C.red;
+      lines.push(`  ${C.dim}BUDGET${C.reset}  ${C.dim}limit:${C.reset} ${C.bold}${formatCost(budget)}${C.reset}  ${C.dim}spent:${C.reset} ${C.bold}${formatCost(totalSpend)}${C.reset}  ${C.dim}remaining:${C.reset} ${remainColor}${C.bold}${formatCost(remaining)}${C.reset}`);
+    }
 
     lines.push('');
     lines.push(`  ${C.bold}${C.cyan}RECENT THREADS${C.reset}`);
@@ -599,13 +658,15 @@ export function renderDashboard(state) {
     !/UTF-8|UTF8/i.test(envLocale)
   );
 
+  const budget = state.budget || 0;
+
   if (state.viewMode === 'compact') {
-    return renderCompact(state.provider, state.claudeSessions || [], state.codexData || null, width, screenWidth, now, ascii);
+    return renderCompact(state.provider, state.claudeSessions || [], state.codexData || null, width, screenWidth, now, ascii, budget, state.claudeWeeklyData || null);
   }
 
   if (state.provider === 'codex') {
-    return renderCodexDetail(state.codexData || null, width, screenWidth, now, ascii);
+    return renderCodexDetail(state.codexData || null, width, screenWidth, now, ascii, budget);
   }
 
-  return renderClaudeDetail(state.claudeSessions || [], state.claudeWeeklyData || null, width, screenWidth, now, ascii);
+  return renderClaudeDetail(state.claudeSessions || [], state.claudeWeeklyData || null, width, screenWidth, now, ascii, budget);
 }

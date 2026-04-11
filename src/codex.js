@@ -244,9 +244,23 @@ export function collectCodexData(opts = {}) {
     };
   });
 
+  // Aggregate token totals across all sessions for total cost tracking.
+  let allTotalInputTokens = 0;
+  let allTotalOutputTokens = 0;
+  let allTotalCachedInputTokens = 0;
+  for (const entry of indexEntries) {
+    const record = getRecord(entry);
+    allTotalInputTokens += record.totalInputTokens;
+    allTotalOutputTokens += record.totalOutputTokens;
+    allTotalCachedInputTokens += record.totalCachedInputTokens;
+  }
+
   return {
     activeSession,
     recentThreads,
     cwd,
+    allTotalInputTokens,
+    allTotalOutputTokens,
+    allTotalCachedInputTokens,
   };
 }

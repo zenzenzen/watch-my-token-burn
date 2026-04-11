@@ -16,7 +16,6 @@ test('parseCliArgs reads provider and view flags', () => {
     '--interval', '5000',
     '--autoclear', '10',
     '--ascii',
-    '--watch',
     '--once',
   ]);
   assert.equal(parsed.host, 'claude');
@@ -28,7 +27,6 @@ test('parseCliArgs reads provider and view flags', () => {
   assert.equal(parsed.refreshInterval, 5000);
   assert.equal(parsed.autoClearMinutes, 10);
   assert.equal(parsed.ascii, true);
-  assert.equal(parsed.watch, true);
   assert.equal(parsed.once, true);
 });
 

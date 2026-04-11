@@ -46,6 +46,8 @@ export function parseCliArgs(args) {
   const mode = normalizeMode(findOption(args, '--mode'), host);
   const rows = parseInt(findOption(args, '--rows'), 10);
 
+  const budget = parseFloat(findOption(args, '--budget'));
+
   return {
     host,
     mode,
@@ -55,8 +57,8 @@ export function parseCliArgs(args) {
     autoClearMinutes: Number.isFinite(autoClear) && autoClear > 0 ? autoClear : DEFAULT_AUTOCLEAR_MINUTES,
     provider: normalizeProvider(findOption(args, '--provider')),
     viewMode: normalizeViewMode(findOption(args, '--view')),
+    budget: Number.isFinite(budget) && budget > 0 ? budget : 0,
     ascii: args.includes('--ascii'),
-    watch: args.includes('--watch'),
     once: args.includes('--once'),
     help: args.includes('--help') || args.includes('-h'),
   };
@@ -96,6 +98,6 @@ export function reduceInput(state, key) {
       }
       return { state: nextState, action: 'noop' };
     default:
-      return { state: nextState, action: 'refresh' };
+      return { state: nextState, action: 'noop' };
   }
 }
