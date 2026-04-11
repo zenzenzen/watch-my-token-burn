@@ -1,5 +1,5 @@
 import { MODEL_PRICING, CODEX_PRICING } from './pricing.js';
-import { formatModelName, basenameLabel, stripAnsi, primaryClaudeSession } from './format.js';
+import { calculateCacheHitRate, formatModelName, basenameLabel, stripAnsi, primaryClaudeSession } from './format.js';
 
 // =============================================================================
 // RENDERING ARCHITECTURE
@@ -135,6 +135,7 @@ function formatTokens(value) {
 }
 
 function formatCost(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return '--';
   if (value >= 1) return `$${value.toFixed(2)}`;
   if (value >= 0.01) return `$${value.toFixed(3)}`;
   return `$${value.toFixed(4)}`;
@@ -153,6 +154,219 @@ function formatTime(date) {
   return date.toLocaleTimeString('en-US', { hour12: false });
 }
 
+function normalizeTimestampMs(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1_000_000_000_000 ? value : value * 1000;
+  }
+
+  if (typeof value === 'string' && value) {
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function formatTimelineTime(value) {
+  const timestampMs = normalizeTimestampMs(value);
+  if (timestampMs === null) return '--:--';
+  return new Date(timestampMs).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function sampleTimelinePoints(points, maxPoints) {
+  if (!Array.isArray(points) || points.length === 0) return [];
+  if (points.length <= maxPoints) return [...points];
+  if (maxPoints <= 1) return [points[points.length - 1]];
+
+  const sampled = [];
+  const step = (points.length - 1) / (maxPoints - 1);
+  for (let index = 0; index < maxPoints; index++) {
+    sampled.push(points[Math.round(index * step)]);
+  }
+  return sampled;
+}
+
+function renderSparkline(values, width, ascii = false) {
+  const levels = ascii ? '._-:=+*#%@' : '▁▂▃▄▅▆▇█';
+  if (!Array.isArray(values) || values.length === 0 || width <= 0) return '';
+
+  const sampled = values.length > width
+    ? sampleTimelinePoints(values.map(value => ({ value })), width).map(point => point.value)
+    : values;
+  const min = Math.min(...sampled);
+  const max = Math.max(...sampled);
+
+  if (max === min) {
+    return levels[Math.floor((levels.length - 1) / 2)].repeat(sampled.length);
+  }
+
+  return sampled.map(value => {
+    const ratio = (value - min) / (max - min);
+    const index = Math.min(levels.length - 1, Math.max(0, Math.round(ratio * (levels.length - 1))));
+    return levels[index];
+  }).join('');
+}
+
+function calculateAverageBurn(totalCost, startedAt, latestTimestamp, nowMs = Date.now()) {
+  const startMs = normalizeTimestampMs(startedAt);
+  const endMs = normalizeTimestampMs(latestTimestamp) ?? nowMs;
+  const elapsedMs = startMs === null || endMs <= startMs ? null : endMs - startMs;
+
+  if (elapsedMs === null || !Number.isFinite(totalCost)) {
+    return { elapsedMs: null, costPerHour: null };
+  }
+
+  return {
+    elapsedMs,
+    costPerHour: elapsedMs > 0 ? totalCost / (elapsedMs / (60 * 60 * 1000)) : null,
+  };
+}
+
+function renderSessionTimelinePanel(lines, {
+  title = 'SESSION BURN',
+  timeline = [],
+  totalTokens = 0,
+  totalCost = 0,
+  startedAt = null,
+  latestTimestamp = null,
+  width,
+  ascii = false,
+  nowMs = Date.now(),
+}) {
+  const sparkWidth = Math.max(12, Math.min(36, width - 24));
+  const sampled = sampleTimelinePoints(timeline, sparkWidth);
+  const burn = calculateAverageBurn(totalCost, timeline[0]?.timestamp || startedAt, latestTimestamp || sampled[sampled.length - 1]?.timestamp, nowMs);
+  const updateCount = Array.isArray(timeline) ? timeline.length : 0;
+
+  lines.push('');
+
+  if (sampled.length < 2) {
+    lines.push(`  ${C.dim}${title}${C.reset}  ${C.dim}warming up${C.reset}  ${C.dim}(${updateCount} update${updateCount === 1 ? '' : 's'})${C.reset}`);
+    return;
+  }
+
+  const values = sampled.map(point => point.totalTokens || 0);
+  const sparkline = renderSparkline(values, sparkWidth, ascii);
+  const avgBurnText = burn.costPerHour === null
+    ? `${C.dim}avg --/hr${C.reset}`
+    : `${C.dim}avg${C.reset} ${C.bold}${formatCost(burn.costPerHour)}${C.reset}${C.dim}/hr${C.reset}`;
+  const elapsedText = burn.elapsedMs === null
+    ? `${C.dim}elapsed --${C.reset}`
+    : `${C.dim}${formatDuration(burn.elapsedMs)} elapsed${C.reset}`;
+
+  lines.push(`  ${C.dim}${title}${C.reset}  ${avgBurnText}  ${elapsedText}  ${C.dim}${updateCount} updates${C.reset}`);
+  lines.push(`  ${C.dim}${formatTimelineTime(sampled[0]?.timestamp)}${C.reset} ${C.bold}${sparkline}${C.reset} ${C.dim}${formatTimelineTime(sampled[sampled.length - 1]?.timestamp)}${C.reset}`);
+  lines.push(`  ${C.dim}${formatTokens(values[0] || 0)}${C.reset} ${C.dim}->${C.reset} ${C.bold}${formatTokens(totalTokens || values[values.length - 1] || 0)}${C.reset} ${C.dim}tokens${C.reset}`);
+}
+
+function renderAdvisorPanel(lines, messages, width, ascii = false) {
+  const bullet = ascii ? '-' : '•';
+  lines.push('');
+  lines.push(`  ${horizontalLine(width - 2)}`);
+  lines.push(`  ${C.bold}${C.cyan}EFFICIENCY ADVISOR${C.reset}`);
+
+  if (!messages.length) {
+    lines.push(`  ${C.dim}No active coaching flags right now.${C.reset}`);
+    return;
+  }
+
+  for (const message of messages.slice(0, 4)) {
+    lines.push(`  ${C.dim}${bullet}${C.reset} ${message}`);
+  }
+}
+
+function buildClaudeAdvisorMessages(sessions, weeklyData, budget, nowMs) {
+  if (!sessions.length) return [];
+
+  const messages = [];
+  const primary = primaryClaudeSession(sessions);
+  const aggregateCacheHitRate = getClaudeAggregateCacheHitRate(sessions);
+  const totalInputTraffic = sessions.reduce((sum, session) =>
+    sum + (session.totals.totalInput || 0) + (session.totals.totalCacheRead || 0) + (session.totals.totalCacheCreate || 0), 0);
+  const totalCacheCreate = sessions.reduce((sum, session) => sum + (session.totals.totalCacheCreate || 0), 0);
+  const cacheCreateShare = totalInputTraffic > 0 ? (totalCacheCreate / totalInputTraffic) * 100 : null;
+  const contextLimit = getContextLimit(primary?.model);
+  const contextPercent = primary?.context?.total > 0 ? (primary.context.total / contextLimit) * 100 : null;
+  const primaryCost = primary ? getSessionCost(primary.model, primary.totals) : 0;
+  const burn = calculateAverageBurn(primaryCost, primary?.timeline?.[0]?.timestamp || primary?.startedAt, primary?.latestTimestamp, nowMs);
+
+  if (aggregateCacheHitRate !== null) {
+    if (aggregateCacheHitRate < 40) {
+      messages.push(`Cache hits are only ${formatPercent(aggregateCacheHitRate)} across Claude sessions. Prompt setup looks churny; reuse stable context or seed more through CLAUDE.md.`);
+    } else if (aggregateCacheHitRate >= 85) {
+      messages.push(`Cache hits are ${formatPercent(aggregateCacheHitRate)} across Claude sessions. Prompt reuse looks efficient.`);
+    }
+  }
+
+  if (cacheCreateShare !== null && cacheCreateShare >= 25) {
+    messages.push(`Cache creation is ${formatPercent(cacheCreateShare)} of Claude input traffic. You're rewriting a lot of context instead of reusing it.`);
+  }
+
+  if (contextPercent !== null && contextPercent >= 70) {
+    messages.push(`${primary.projectName} is sitting at ${formatPercent(contextPercent)} of context. Compaction pressure is getting close.`);
+  }
+
+  if (burn.costPerHour !== null && burn.costPerHour >= 5) {
+    messages.push(`${primary.projectName} is averaging ${formatCost(burn.costPerHour)}/hr in the current burn window.`);
+  }
+
+  if (budget > 0 && (weeklyData?.estimatedCost || 0) >= budget * 0.8) {
+    messages.push(`Estimated weekly spend is already ${formatCost(weeklyData.estimatedCost)} against a ${formatCost(budget)} budget.`);
+  }
+
+  return messages;
+}
+
+function buildCodexAdvisorMessages(codexData, budget, nowMs) {
+  const active = codexData?.activeSession;
+  if (!active) return [];
+
+  const messages = [];
+  const cacheHitRate = getCodexCacheHitRate(active);
+  const contextPercent = active.modelContextWindow > 0 ? (active.currentContextTokens / active.modelContextWindow) * 100 : null;
+  const primaryLimit = active.rateLimits?.primary?.usedPercent ?? null;
+  const secondaryLimit = active.rateLimits?.secondary?.usedPercent ?? null;
+  const sessionCost = getCodexSessionCost(active);
+  const burn = calculateAverageBurn(sessionCost, active.timeline?.[0]?.timestamp || active.startedAt, active.latestTimestamp, nowMs);
+
+  if (cacheHitRate !== null) {
+    if (cacheHitRate < 40) {
+      messages.push(`Cache hits are only ${formatPercent(cacheHitRate)} on this Codex thread. Context reuse is low, so repeated turns are staying expensive.`);
+    } else if (cacheHitRate >= 85) {
+      messages.push(`Cache hits are ${formatPercent(cacheHitRate)} on this Codex thread. Reuse looks healthy.`);
+    }
+  }
+
+  if (contextPercent !== null && contextPercent >= 70) {
+    messages.push(`Context usage is ${formatPercent(contextPercent)} of the model window. You're getting close to compaction territory.`);
+  }
+
+  if (primaryLimit !== null && primaryLimit >= 80) {
+    messages.push(`The 5h Codex limit is already at ${formatPercent(primaryLimit)}. Consider staggering heavy sessions before you hit the wall.`);
+  }
+
+  if (secondaryLimit !== null && secondaryLimit >= 80) {
+    messages.push(`The 7d Codex limit is at ${formatPercent(secondaryLimit)}. Weekly capacity is running tight.`);
+  }
+
+  if (burn.costPerHour !== null && burn.costPerHour >= 10) {
+    messages.push(`This Codex session is averaging ${formatCost(burn.costPerHour)}/hr over the current timeline window.`);
+  }
+
+  if (budget > 0) {
+    const totalSpend = getCodexTotalCost(codexData);
+    if (totalSpend >= budget * 0.8) {
+      messages.push(`Estimated Codex spend is ${formatCost(totalSpend)} against a ${formatCost(budget)} budget.`);
+    }
+  }
+
+  return messages;
+}
+
 
 function truncateText(text, max, ascii = false) {
   if (!text) return '';
@@ -164,6 +378,33 @@ function truncateText(text, max, ascii = false) {
 function formatPercent(value) {
   if (value === null || value === undefined || Number.isNaN(value)) return '--';
   return `${Math.round(value)}%`;
+}
+
+function getClaudeSessionCacheHitRate(session) {
+  return calculateCacheHitRate(session?.totals?.totalInput, session?.totals?.totalCacheRead);
+}
+
+function getClaudeAggregateCacheHitRate(sessions) {
+  const totalInput = sessions.reduce((sum, session) => sum + (session.totals.totalInput || 0), 0);
+  const totalCacheRead = sessions.reduce((sum, session) => sum + (session.totals.totalCacheRead || 0), 0);
+  return calculateCacheHitRate(totalInput, totalCacheRead);
+}
+
+function getCodexCacheHitRate(session) {
+  return calculateCacheHitRate(session?.totalInputTokens, session?.totalCachedInputTokens);
+}
+
+function findMatchingProjectMetric(session, projectMetrics = []) {
+  if (!session) return null;
+
+  const bySession = projectMetrics.find(metric => metric.sessionId && metric.sessionId === session.sessionId);
+  if (bySession) return bySession;
+
+  const byName = projectMetrics.find(metric => metric.name === session.projectName);
+  if (byName) return byName;
+
+  const cwd = session.cwd || '';
+  return projectMetrics.find(metric => metric.path && cwd && cwd.endsWith(metric.path));
 }
 
 function formatRelativeReset(unixSeconds, now = Date.now()) {
@@ -327,10 +568,12 @@ function compactClaudeSegments(sessions, ascii, budget = 0, weeklyData = null) {
   const status = sessionStatus(session);
   const sessionCost = sessions.reduce((sum, s) => sum + getSessionCost(s.model, s.totals), 0);
   const totalSpend = weeklyData?.estimatedCost ?? sessionCost;
+  const cacheHitRate = getClaudeSessionCacheHitRate(session);
   const segments = [
     { text: truncateText(session.projectName || 'unknown', 18, ascii), bg: THEME.bubblegum, fg: THEME.text },
     { text: formatModelName(session.model), bg: THEME.ocean, fg: THEME.text },
     { text: `${formatPercent((session.context.total / getContextLimit(session.model)) * 100)} of ${formatTokens(getContextLimit(session.model))}`, bg: THEME.emerald, fg: THEME.ink },
+    { text: `cache ${formatPercent(cacheHitRate)}`, bg: THEME.panelAlt, fg: THEME.text },
     { text: formatCost(sessionCost), bg: THEME.golden, fg: THEME.ink },
     { text: status.label, bg: status.color, fg: status.fg },
   ];
@@ -350,11 +593,13 @@ function compactCodexSegments(codexData, ascii, budget = 0) {
   const primary = active.rateLimits?.primary;
   const secondary = active.rateLimits?.secondary;
   const cost = getCodexSessionCost(active);
+  const cacheHitRate = getCodexCacheHitRate(active);
   const segments = [
     { text: truncateText(active.threadName || active.workspaceLabel || 'Codex', 18, ascii), bg: THEME.bubblegum, fg: THEME.text },
     { text: 'Codex', bg: THEME.ocean, fg: THEME.text },
     { text: `5h ${formatPercent(primary?.usedPercent)}`, bg: THEME.golden, fg: THEME.ink },
     { text: `7d ${formatPercent(secondary?.usedPercent)}`, bg: THEME.emerald, fg: THEME.ink },
+    { text: `cache ${formatPercent(cacheHitRate)}`, bg: THEME.panelAlt, fg: THEME.text },
     { text: `${formatTokens(active.currentContextTokens)} ctx`, bg: THEME.panelAlt, fg: THEME.text },
     { text: `${formatTokens(active.totalTokens)} tok`, bg: THEME.panelSoft, fg: THEME.text },
     { text: formatCost(cost), bg: THEME.golden, fg: THEME.ink },
@@ -406,10 +651,12 @@ function renderClaudeSummaryStrip(sessions, ascii) {
   const totalTokens = sessions.reduce((sum, session) => sum + session.totals.totalTokens, 0);
   const totalContext = sessions.reduce((sum, session) => sum + (session.alive ? session.context.total : 0), 0);
   const totalCost = sessions.reduce((sum, session) => sum + getSessionCost(session.model, session.totals), 0);
+  const cacheHitRate = getClaudeAggregateCacheHitRate(sessions);
 
   return renderPowerline([
     { text: sessions.length === 1 ? primary.projectName : `${sessions.length} sessions`, bg: THEME.bubblegum, fg: THEME.text },
     { text: primary.model !== 'unknown' ? formatModelName(primary.model) : `${activeSessions.length} active`, bg: THEME.ocean, fg: THEME.text },
+    { text: `cache ${formatPercent(cacheHitRate)}`, bg: THEME.panelAlt, fg: THEME.text },
     { text: formatCost(totalCost), bg: THEME.golden, fg: THEME.ink },
     { text: `${formatPercent((totalContext / getContextLimit(primary.model)) * 100)} of ${formatTokens(getContextLimit(primary.model))}`, bg: THEME.emerald, fg: THEME.ink },
     { text: `${formatTokens(totalTokens)} tokens`, bg: THEME.panelSoft, fg: THEME.text },
@@ -417,7 +664,7 @@ function renderClaudeSummaryStrip(sessions, ascii) {
 }
 
 // Consumes ClaudeSession[] from collector.js — NOT the snapshot schema. See RENDERING ARCHITECTURE above.
-function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii, budget = 0) {
+function renderClaudeDetail(sessions, weeklyData, projectMetrics, rateLimitCache, width, screenWidth, now, ascii, budget = 0) {
   const barWidth = Math.max(30, width - 22);
   const lines = [];
   const g = glyphs(ascii);
@@ -432,6 +679,16 @@ function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii
 
   lines.push('');
   lines.push(`  ${horizontalLine(width - 2, g.line)}`);
+
+  if (rateLimitCache?.primary || rateLimitCache?.secondary) {
+    renderRateLimitPanel(lines, 'PRIMARY LIMIT', rateLimitCache?.primary, width, C.bgYellow, now.getTime());
+    renderRateLimitPanel(lines, 'SECONDARY LIMIT', rateLimitCache?.secondary, width, C.bgPurple, now.getTime());
+    if (rateLimitCache?.updatedAt) {
+      lines.push(`  ${C.dim}Claude rate limits cached from hook data at ${rateLimitCache.updatedAt}${C.reset}`);
+    }
+    lines.push('');
+    lines.push(`  ${horizontalLine(width - 2, g.line)}`);
+  }
 
   if (sessions.length === 0) {
     lines.push('');
@@ -490,36 +747,73 @@ function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii
     if (session.totals.totalTokens > 0) {
       const mainTokens = Math.max(0, session.totals.totalTokens - session.totals.latestTotal);
       const cost = getSessionCost(session.model, session.totals);
+      const cacheHitRate = getClaudeSessionCacheHitRate(session);
       const sessionBar = solidBar([
         { value: mainTokens, bg: C.bgBlue },
         { value: session.totals.latestTotal, bg: C.bgPurple },
       ], session.totals.totalTokens, barWidth);
 
       lines.push('');
-      lines.push(`  ${C.dim}SESSION TOKENS${C.reset}  ${C.bold}${formatTokens(session.totals.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(in: ${formatTokens(session.totals.totalInput + session.totals.totalCacheRead + session.totals.totalCacheCreate)}  out: ${formatTokens(session.totals.totalOutput)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(cost)}${C.reset}`);
+      lines.push(`  ${C.dim}SESSION TOKENS${C.reset}  ${C.bold}${formatTokens(session.totals.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(in: ${formatTokens(session.totals.totalInput + session.totals.totalCacheRead + session.totals.totalCacheCreate)}  out: ${formatTokens(session.totals.totalOutput)}  cache hit: ${formatPercent(cacheHitRate)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(cost)}${C.reset}`);
       lines.push(`  ${sessionBar}`);
       lines.push('');
       lines.push(`  ${dot(C.bgBlue, `${C.blue}cumulative ${formatTokens(session.totals.totalTokens)}${C.reset}`)}  ${dot(C.bgPurple, `${C.purple}latest turn ${formatTokens(session.totals.latestTotal)}${C.reset}`)}`);
+      renderSessionTimelinePanel(lines, {
+        timeline: session.timeline || [],
+        totalTokens: session.totals.totalTokens,
+        totalCost: cost,
+        startedAt: session.startedAt,
+        latestTimestamp: session.latestTimestamp,
+        width,
+        ascii,
+        nowMs: now.getTime(),
+      });
       lines.push('');
     }
   }
 
   if (budget > 0) {
     const sessionCost = sessions.reduce((sum, s) => sum + getSessionCost(s.model, s.totals), 0);
-    const totalSpend = weeklyData?.estimatedCost ?? sessionCost;
-    const remaining = budget - totalSpend;
+    const estimatedSpend = weeklyData?.estimatedCost ?? sessionCost;
+    const billedSpend = weeklyData?.billedCost ?? null;
+    const remaining = budget - estimatedSpend;
+    const billedRemaining = billedSpend === null ? null : budget - billedSpend;
     const remainColor = remaining >= 0 ? C.green : C.red;
     lines.push('');
     lines.push(`  ${horizontalLine(width - 2)}`);
-    lines.push(`  ${C.bold}${C.cyan}BUDGET${C.reset}  ${C.dim}limit:${C.reset} ${C.bold}${formatCost(budget)}${C.reset}  ${C.dim}spent:${C.reset} ${C.bold}${formatCost(totalSpend)}${C.reset}  ${C.dim}remaining:${C.reset} ${remainColor}${C.bold}${formatCost(remaining)}${C.reset}`);
+    lines.push(`  ${C.bold}${C.cyan}BUDGET${C.reset}  ${C.dim}limit:${C.reset} ${C.bold}${formatCost(budget)}${C.reset}  ${C.dim}est spent:${C.reset} ${C.bold}${formatCost(estimatedSpend)}${C.reset}  ${C.dim}est remaining:${C.reset} ${remainColor}${C.bold}${formatCost(remaining)}${C.reset}`);
+    if (billedSpend !== null) {
+      const billedColor = billedRemaining >= 0 ? C.green : C.red;
+      lines.push(`  ${C.dim}BUDGET${C.reset}  ${C.dim}billed spent:${C.reset} ${C.bold}${formatCost(billedSpend)}${C.reset}  ${C.dim}billed remaining:${C.reset} ${billedColor}${C.bold}${formatCost(billedRemaining)}${C.reset}`);
+    }
   }
+
+  if (projectMetrics?.length) {
+    lines.push('');
+    lines.push(`  ${horizontalLine(width - 2)}`);
+    lines.push(`  ${C.bold}${C.cyan}PROJECT BILLING${C.reset}`);
+    const shown = projectMetrics.slice(0, 5);
+    for (const metric of shown) {
+      const matchedSession = sessions.find(session => findMatchingProjectMetric(session, [metric]));
+      const name = matchedSession ? `${C.bold}${metric.name}${C.reset}` : metric.name;
+      lines.push(`  ${name}  ${C.dim}billed:${C.reset} ${C.bold}${formatCost(metric.cost)}${C.reset}  ${C.dim}in:${C.reset} ${formatTokens(metric.totalInput + metric.totalCacheRead + metric.totalCacheCreate)}  ${C.dim}out:${C.reset} ${formatTokens(metric.totalOutput)}`);
+    }
+  }
+
+  renderAdvisorPanel(lines, buildClaudeAdvisorMessages(sessions, weeklyData, budget, now.getTime()), width, ascii);
 
   lines.push('');
   lines.push(`  ${horizontalLine(width - 2)}`);
   lines.push(`  ${C.bold}${C.cyan}WEEKLY SUMMARY${C.reset}`);
 
   if (weeklyData) {
-    lines.push(`  ${C.dim}Total:${C.reset} ${C.bold}${formatTokens(weeklyData.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${weeklyData.sessionCount}${C.reset} sessions  ${C.dim}|${C.reset}  ${C.bold}${formatCost(weeklyData.estimatedCost)}${C.reset} est.`);
+    const machineText = weeklyData.machineCount > 1
+      ? `  ${C.dim}|${C.reset}  ${C.bold}${weeklyData.machineCount}${C.reset} machines`
+      : '';
+    const billedText = weeklyData.billedCost === null
+      ? `${C.dim}billed:${C.reset} ${C.bold}--${C.reset}`
+      : `${C.dim}billed:${C.reset} ${C.bold}${formatCost(weeklyData.billedCost)}${C.reset}`;
+    lines.push(`  ${C.dim}Total:${C.reset} ${C.bold}${formatTokens(weeklyData.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${weeklyData.sessionCount}${C.reset} sessions${machineText}  ${C.dim}|${C.reset}  ${C.dim}est:${C.reset} ${C.bold}${formatCost(weeklyData.estimatedCost)}${C.reset}  ${C.dim}|${C.reset}  ${billedText}`);
     renderWeeklyChart(lines, weeklyData, barWidth, g);
   } else {
     lines.push(`  ${C.dim}No weekly data available yet.${C.reset}`);
@@ -561,11 +855,13 @@ function renderRateLimitPanel(lines, title, rateLimit, width, colorBg, nowMs) {
 
 function renderCodexSummaryStrip(active, ascii) {
   if (!active) return '';
+  const cacheHitRate = getCodexCacheHitRate(active);
   return renderPowerline([
     { text: truncateText(active.threadName || active.workspaceLabel || 'Codex', 18, ascii), bg: THEME.bubblegum, fg: THEME.text },
     { text: 'Codex', bg: THEME.ocean, fg: THEME.text },
     { text: `5h ${formatPercent(active.rateLimits?.primary?.usedPercent)}`, bg: THEME.golden, fg: THEME.ink },
     { text: `7d ${formatPercent(active.rateLimits?.secondary?.usedPercent)}`, bg: THEME.emerald, fg: THEME.ink },
+    { text: `cache ${formatPercent(cacheHitRate)}`, bg: THEME.panelAlt, fg: THEME.text },
     { text: `${formatTokens(active.currentContextTokens)} ctx`, bg: THEME.panelAlt, fg: THEME.text },
     { text: `${formatTokens(active.totalTokens)} tok`, bg: THEME.panelSoft, fg: THEME.text },
   ], ascii);
@@ -619,8 +915,19 @@ function renderCodexDetail(codexData, width, screenWidth, now, ascii, budget = 0
     lines.push(`  ${dot(C.bgBlue, `${C.blue}cached ${formatTokens(cachedContext)}${C.reset}`)}  ${dot(C.bgGreen, `${C.green}fresh ${formatTokens(freshContext)}${C.reset}`)}  ${dot(C.bgPurple, `${C.purple}out+reason ${formatTokens(outputAccent)}${C.reset}`)}  ${dot(C.bgDark, `${C.dim}free ${formatTokens(remaining)}${C.reset}`)}`);
 
     const sessionCost = getCodexSessionCost(active);
+    const cacheHitRate = getCodexCacheHitRate(active);
     lines.push('');
-    lines.push(`  ${C.dim}TOKEN TOTALS${C.reset}  ${C.bold}${formatTokens(active.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(last ${formatTokens(active.lastTokens)}  cache ${formatTokens(active.totalCachedInputTokens)}  out ${formatTokens(active.totalOutputTokens)}  reason ${formatTokens(active.totalReasoningOutputTokens)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(sessionCost)}${C.reset}`);
+    lines.push(`  ${C.dim}TOKEN TOTALS${C.reset}  ${C.bold}${formatTokens(active.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(last ${formatTokens(active.lastTokens)}  cache ${formatTokens(active.totalCachedInputTokens)}  out ${formatTokens(active.totalOutputTokens)}  reason ${formatTokens(active.totalReasoningOutputTokens)}  cache hit: ${formatPercent(cacheHitRate)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(sessionCost)}${C.reset}`);
+    renderSessionTimelinePanel(lines, {
+      timeline: active.timeline || [],
+      totalTokens: active.totalTokens,
+      totalCost: sessionCost,
+      startedAt: active.startedAt,
+      latestTimestamp: active.latestTimestamp,
+      width,
+      ascii,
+      nowMs: now.getTime(),
+    });
 
     if (budget > 0) {
       const totalSpend = getCodexTotalCost(codexData);
@@ -640,12 +947,17 @@ function renderCodexDetail(codexData, width, screenWidth, now, ascii, budget = 0
     }
   }
 
+  renderAdvisorPanel(lines, buildCodexAdvisorMessages(codexData, budget, now.getTime()), width, ascii);
+
   lines.push('');
   lines.push(`  ${horizontalLine(width - 2)}`);
   lines.push(`  ${C.bold}${C.cyan}WEEKLY SUMMARY${C.reset}`);
 
   if (codexWeeklyData) {
-    lines.push(`  ${C.dim}Total:${C.reset} ${C.bold}${formatTokens(codexWeeklyData.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${codexWeeklyData.sessionCount}${C.reset} sessions  ${C.dim}|${C.reset}  ${C.bold}${formatCost(codexWeeklyData.estimatedCost)}${C.reset} est.`);
+    const machineText = codexWeeklyData.machineCount > 1
+      ? `  ${C.dim}|${C.reset}  ${C.bold}${codexWeeklyData.machineCount}${C.reset} machines`
+      : '';
+    lines.push(`  ${C.dim}Total:${C.reset} ${C.bold}${formatTokens(codexWeeklyData.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${codexWeeklyData.sessionCount}${C.reset} sessions${machineText}  ${C.dim}|${C.reset}  ${C.bold}${formatCost(codexWeeklyData.estimatedCost)}${C.reset} est.`);
     renderWeeklyChart(lines, codexWeeklyData, barWidth, g);
   } else {
     lines.push(`  ${C.dim}No weekly data available yet.${C.reset}`);
@@ -681,5 +993,15 @@ export function renderDashboard(state) {
     return renderCodexDetail(state.codexData || null, width, screenWidth, now, ascii, budget, state.codexWeeklyData || null);
   }
 
-  return renderClaudeDetail(state.claudeSessions || [], state.claudeWeeklyData || null, width, screenWidth, now, ascii, budget);
+  return renderClaudeDetail(
+    state.claudeSessions || [],
+    state.claudeWeeklyData || null,
+    state.claudeProjectMetrics || [],
+    state.claudeRateLimits || null,
+    width,
+    screenWidth,
+    now,
+    ascii,
+    budget,
+  );
 }

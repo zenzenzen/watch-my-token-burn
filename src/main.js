@@ -4,7 +4,7 @@
  * token-gauge — Terminal usage views for local dashboards and footer hooks.
  */
 
-import { collectSessions } from './collector.js';
+import { collectProjectMetrics, collectSessions } from './collector.js';
 import { collectCodexData } from './codex.js';
 import {
   parseCliArgs,
@@ -13,6 +13,8 @@ import {
 import { refreshWeeklyData } from './tracker.js';
 import { refreshCodexWeeklyData } from './codex-tracker.js';
 import { renderDashboard } from './ui.js';
+import { collectStandaloneState } from './full-state.js';
+import { loadClaudeRateLimitCache, saveClaudeRateLimitCache } from './claude-rate-limits.js';
 import {
   collectLocalSnapshot,
   createClaudeHookSnapshot,
@@ -54,6 +56,10 @@ Common options:
   --once                 Print once and exit
   -h, --help             Show this help
 
+Config file:
+  ~/.config/token-gauge/config.json
+  CLI flags override config values, and config values override built-in defaults
+
 Standalone fullscreen options:
   -i, --interval <ms>    Refresh interval in ms (default: 15000)
   --autoclear <min>      Auto-clear stale Claude sessions after N minutes (default: 30)
@@ -87,12 +93,15 @@ Fullscreen controls:
 class FullscreenApp {
   constructor(config) {
     this.claudeSessions = [];
+    this.claudeProjectMetrics = [];
     this.claudeWeeklyData = null;
+    this.claudeRateLimits = null;
     this.codexData = null;
     this.codexWeeklyData = null;
     this.running = true;
     this.refreshInterval = config.refreshInterval;
     this.autoClearMinutes = config.autoClearMinutes;
+    this.aggregateDir = config.aggregateDir || null;
     this.provider = config.provider;
     this.viewMode = config.viewMode;
     this.ascii = config.ascii;
@@ -104,14 +113,16 @@ class FullscreenApp {
 
   collectData() {
     this.claudeSessions = collectSessions();
+    this.claudeProjectMetrics = collectProjectMetrics();
+    this.claudeRateLimits = loadClaudeRateLimitCache();
     this.codexData = collectCodexData();
 
     const weeklyRefreshEvery = Math.max(1, Math.round(30000 / this.refreshInterval));
     if (this._weeklyCounter % weeklyRefreshEvery === 0) {
       if (this.provider === 'claude') {
-        this.claudeWeeklyData = refreshWeeklyData();
+        this.claudeWeeklyData = refreshWeeklyData({ aggregateDir: this.aggregateDir });
       } else {
-        this.codexWeeklyData = refreshCodexWeeklyData();
+        this.codexWeeklyData = refreshCodexWeeklyData({ aggregateDir: this.aggregateDir });
       }
     }
     this._weeklyCounter++;
@@ -134,6 +145,8 @@ class FullscreenApp {
       viewMode: this.viewMode,
       claudeSessions: this.claudeSessions,
       claudeWeeklyData: this.claudeWeeklyData,
+      claudeProjectMetrics: this.claudeProjectMetrics,
+      claudeRateLimits: this.claudeRateLimits,
       codexData: this.codexData,
       codexWeeklyData: this.codexWeeklyData,
       cols: process.stdout.columns,
@@ -333,6 +346,13 @@ async function runHookAdapter(config) {
     ? createClaudeHookSnapshot(hookData)
     : createCodexHookSnapshot(hookData);
 
+  if (config.host === 'claude') {
+    saveClaudeRateLimitCache({
+      primary: snapshot.primaryLimit,
+      secondary: snapshot.secondaryLimit,
+    });
+  }
+
   process.stdout.write(`${renderFormattedSnapshot(snapshot, config)}\n`);
 }
 
@@ -372,15 +392,22 @@ async function main() {
   const app = new FullscreenApp(config);
 
   if (config.once) {
+    if (config.format === 'json') {
+      process.stdout.write(`${JSON.stringify(collectStandaloneState(config), null, 2)}\n`);
+      return;
+    }
+
     app.collectData();
     app.autoClear();
     process.stdout.write(renderDashboard({
       provider: app.provider,
       viewMode: app.viewMode,
       claudeSessions: app.claudeSessions,
-      claudeWeeklyData: app.provider === 'claude' ? refreshWeeklyData() : null,
+      claudeProjectMetrics: app.claudeProjectMetrics,
+      claudeRateLimits: app.claudeRateLimits,
       codexData: app.codexData,
-      codexWeeklyData: app.provider === 'codex' ? refreshCodexWeeklyData() : null,
+      claudeWeeklyData: app.provider === 'claude' ? refreshWeeklyData({ aggregateDir: config.aggregateDir }) : null,
+      codexWeeklyData: app.provider === 'codex' ? refreshCodexWeeklyData({ aggregateDir: config.aggregateDir }) : null,
       cols: process.stdout.columns,
       ascii: app.ascii,
       budget: app.budget,

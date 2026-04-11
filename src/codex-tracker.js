@@ -6,38 +6,97 @@
  * Token counts are cumulative per session, so this is a per-session approximation.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
+import { hostname } from 'node:os';
 import { CODEX_PRICING } from './pricing.js';
 import { collectAllCodexSessions } from './codex.js';
+import { resolveTokenGaugeConfigDir } from './scan-index.js';
 
-const CONFIG_DIR = join(homedir(), '.config', 'token-gauge');
-const CODEX_WEEKLY_FILE = join(CONFIG_DIR, 'codex-weekly.json');
+function resolveTrackerPaths(opts = {}) {
+  const configDir = resolveTokenGaugeConfigDir(opts.configDir);
+  const machineId = (opts.machineId || hostname()).replace(/[^a-zA-Z0-9._-]/g, '-');
+  const aggregateDir = opts.aggregateDir || opts.sharedWeeklyDir || null;
+  return {
+    configDir,
+    weeklyFile: opts.weeklyFilePath || join(configDir, 'codex-weekly.json'),
+    aggregateDir,
+    machineId,
+    aggregateWeeklyFile: aggregateDir ? join(aggregateDir, `codex-weekly-${machineId}.json`) : null,
+  };
+}
 
-function ensureDir() {
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
+function ensureDir(configDir) {
+  if (!existsSync(configDir)) {
+    mkdirSync(configDir, { recursive: true });
   }
 }
 
-function loadWeeklyFile() {
+function loadWeeklyFile(weeklyFile) {
   try {
-    return JSON.parse(readFileSync(CODEX_WEEKLY_FILE, 'utf8'));
+    return JSON.parse(readFileSync(weeklyFile, 'utf8'));
   } catch {
     return { days: {}, lastUpdated: null };
   }
 }
 
-function saveWeeklyFile(data) {
+function saveWeeklyFile(data, configDir, weeklyFile, now) {
   try {
-    ensureDir();
-    data.lastUpdated = new Date().toISOString();
-    writeFileSync(CODEX_WEEKLY_FILE, JSON.stringify(data, null, 2));
+    ensureDir(configDir);
+    data.lastUpdated = now.toISOString();
+    writeFileSync(weeklyFile, JSON.stringify(data, null, 2));
     return true;
   } catch {
     return false;
   }
+}
+
+function sumCodexDay(target, dayData = {}) {
+  target.tokens += dayData.tokens || 0;
+  target.inputTokens += dayData.inputTokens || 0;
+  target.outputTokens += dayData.outputTokens || 0;
+  target.cachedTokens += dayData.cachedTokens || 0;
+  target.sessions += dayData.sessions || 0;
+}
+
+function loadAggregateWeeklyData({ aggregateDir, fallbackData }) {
+  if (!aggregateDir || !existsSync(aggregateDir)) {
+    return { data: fallbackData, machineCount: 1 };
+  }
+
+  const files = [];
+  try {
+    for (const name of readdirSync(aggregateDir)) {
+      if (!name.startsWith('codex-weekly-') || !name.endsWith('.json')) continue;
+      files.push(join(aggregateDir, name));
+    }
+  } catch {
+    return { data: fallbackData, machineCount: 1 };
+  }
+
+  if (!files.length) {
+    return { data: fallbackData, machineCount: 1 };
+  }
+
+  const merged = { days: {}, lastUpdated: null };
+  let machineCount = 0;
+
+  for (const file of files) {
+    const source = loadWeeklyFile(file);
+    if (!source?.days) continue;
+    machineCount++;
+    for (const [key, dayData] of Object.entries(source.days)) {
+      const target = merged.days[key] || { tokens: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0, sessions: 0 };
+      sumCodexDay(target, dayData);
+      merged.days[key] = target;
+    }
+  }
+
+  if (!machineCount) {
+    return { data: fallbackData, machineCount: 1 };
+  }
+
+  return { data: merged, machineCount };
 }
 
 function dateKey(date) {
@@ -53,12 +112,13 @@ function dayLabel(date) {
  * Return shape is identical to refreshWeeklyData() in tracker.js.
  */
 export function refreshCodexWeeklyData(opts = {}) {
-  const data = loadWeeklyFile();
-  const now = new Date();
+  const { configDir, weeklyFile, aggregateDir, aggregateWeeklyFile } = resolveTrackerPaths(opts);
+  const data = loadWeeklyFile(weeklyFile);
+  const now = opts.now ? new Date(opts.now) : new Date();
   const todayKey = dateKey(now);
 
   // Sum tokens from sessions last active today (UTC date match on latestTimestamp)
-  const allSessions = collectAllCodexSessions(opts);
+  const allSessions = (opts.collectAllCodexSessionsFn || collectAllCodexSessions)(opts.collectorOpts || opts);
   let todayTokens = 0;
   let todayInputTokens = 0;
   let todayOutputTokens = 0;
@@ -93,7 +153,16 @@ export function refreshCodexWeeklyData(opts = {}) {
     if (key < weekAgoKey) delete data.days[key];
   }
 
-  saveWeeklyFile(data);
+  saveWeeklyFile(data, configDir, weeklyFile, now);
+  if (aggregateDir && aggregateWeeklyFile) {
+    saveWeeklyFile(data, aggregateDir, aggregateWeeklyFile, now);
+  }
+
+  const aggregate = loadAggregateWeeklyData({
+    aggregateDir,
+    fallbackData: data,
+  });
+  const summaryData = aggregate.data;
 
   // Build summary for the last 7 days
   const daily = [];
@@ -107,7 +176,7 @@ export function refreshCodexWeeklyData(opts = {}) {
     const d = new Date(now);
     d.setDate(d.getDate() - i);
     const key = dateKey(d);
-    const dayData = data.days[key] || { tokens: 0, sessions: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+    const dayData = summaryData.days[key] || { tokens: 0, sessions: 0, inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
     const isToday = key === todayKey;
 
     daily.push({
@@ -137,5 +206,6 @@ export function refreshCodexWeeklyData(opts = {}) {
     totalTokens,
     sessionCount: totalSessions,
     estimatedCost,
+    machineCount: aggregate.machineCount,
   };
 }

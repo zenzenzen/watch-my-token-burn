@@ -5,6 +5,10 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
+import { createScanIndex, readFileChunkSync } from './scan-index.js';
+
+const CLAUDE_SCAN_INDEX_VERSION = 2;
+const CLAUDE_TIMELINE_LIMIT = 48;
 
 function resolveClaudePaths(opts = {}) {
   const claudeDir = opts.claudeDir || join(homedir(), '.claude');
@@ -13,6 +17,8 @@ function resolveClaudePaths(opts = {}) {
     sessionsDir: join(claudeDir, 'sessions'),
     projectsDir: join(claudeDir, 'projects'),
     claudeJsonPath: opts.claudeJsonPath || join(homedir(), '.claude.json'),
+    configDir: opts.configDir || null,
+    useScanIndex: opts.useScanIndex !== false,
   };
 }
 
@@ -33,29 +39,76 @@ function safeReadJson(path) {
   }
 }
 
-function parseJsonlAllUsage(path) {
-  try {
-    const content = readFileSync(path, 'utf8');
-    const lines = content.trim().split('\n');
-    const usages = [];
-    for (const line of lines) {
-      try {
-        const msg = JSON.parse(line);
-        if (msg.type === 'assistant' && msg.message?.usage) {
-          usages.push({
-            timestamp: msg.timestamp || msg.message?.timestamp,
-            model: msg.message.model,
-            usage: msg.message.usage,
-          });
-        }
-      } catch {
-        // Skip malformed lines.
-      }
-    }
-    return usages;
-  } catch {
-    return [];
+function createClaudeUsageState() {
+  return {
+    model: 'unknown',
+    latestTimestamp: null,
+    latestUsage: {},
+    timeline: [],
+    totals: {
+      totalInput: 0,
+      totalOutput: 0,
+      totalCacheRead: 0,
+      totalCacheCreate: 0,
+      totalTokens: 0,
+      latestInput: 0,
+      latestOutput: 0,
+      latestTotal: 0,
+      messageCount: 0,
+    },
+  };
+}
+
+function pushClaudeTimelinePoint(timeline, timestamp, totalTokens) {
+  if (!timestamp || !Number.isFinite(totalTokens)) return;
+
+  timeline.push({ timestamp, totalTokens });
+  if (timeline.length > CLAUDE_TIMELINE_LIMIT) {
+    timeline.splice(0, timeline.length - CLAUDE_TIMELINE_LIMIT);
   }
+}
+
+function applyClaudeUsageRecord(state, record) {
+  const usage = record.usage || {};
+  const input = usage.input_tokens || 0;
+  const output = usage.output_tokens || 0;
+  const cacheRead = usage.cache_read_input_tokens || 0;
+  const cacheCreate = usage.cache_creation_input_tokens || 0;
+
+  state.model = record.model || state.model || 'unknown';
+  state.latestTimestamp = record.timestamp || state.latestTimestamp;
+  state.latestUsage = usage;
+  state.totals.totalInput += input;
+  state.totals.totalOutput += output;
+  state.totals.totalCacheRead += cacheRead;
+  state.totals.totalCacheCreate += cacheCreate;
+  state.totals.totalTokens += input + output + cacheRead + cacheCreate;
+  state.totals.latestInput = input + cacheRead + cacheCreate;
+  state.totals.latestOutput = output;
+  state.totals.latestTotal = state.totals.latestInput + output;
+  state.totals.messageCount += 1;
+  pushClaudeTimelinePoint(state.timeline, record.timestamp, state.totals.totalTokens);
+}
+
+function parseClaudeUsageChunk(content, state = createClaudeUsageState()) {
+  if (!content) return state;
+
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const msg = JSON.parse(line);
+      if (msg.type !== 'assistant' || !msg.message?.usage) continue;
+      applyClaudeUsageRecord(state, {
+        timestamp: msg.timestamp || msg.message?.timestamp || null,
+        model: msg.message.model,
+        usage: msg.message.usage,
+      });
+    } catch {
+      // Skip malformed lines.
+    }
+  }
+
+  return state;
 }
 
 function findSessionJsonl(sessionId, projectsDir) {
@@ -90,12 +143,7 @@ function projectDirToName(dirName) {
   return meaningful.join('-') || dirName;
 }
 
-function computeContextBreakdown(usages) {
-  if (usages.length === 0) {
-    return { active: 0, loaded: 0, stale: 0, total: 0 };
-  }
-
-  const latest = usages[usages.length - 1].usage;
+function computeContextBreakdown(latest = {}) {
   const active = latest.input_tokens || 0;
   const loaded = latest.cache_read_input_tokens || 0;
   const stale = latest.cache_creation_input_tokens || 0;
@@ -104,36 +152,58 @@ function computeContextBreakdown(usages) {
   return { active, loaded, stale, total };
 }
 
-function computeSessionTotals(usages) {
-  let totalInput = 0;
-  let totalOutput = 0;
-  let totalCacheRead = 0;
-  let totalCacheCreate = 0;
+function createClaudeSessionSnapshot(state = createClaudeUsageState()) {
+  return {
+    model: state.model || 'unknown',
+    latestTimestamp: state.latestTimestamp || null,
+    timeline: [...(state.timeline || [])],
+    context: computeContextBreakdown(state.latestUsage || {}),
+    totals: {
+      ...state.totals,
+    },
+  };
+}
 
-  for (const usage of usages) {
-    totalInput += usage.usage.input_tokens || 0;
-    totalOutput += usage.usage.output_tokens || 0;
-    totalCacheRead += usage.usage.cache_read_input_tokens || 0;
-    totalCacheCreate += usage.usage.cache_creation_input_tokens || 0;
+function collectClaudeLogSnapshot(path, index = null) {
+  const stat = statSync(path);
+
+  if (!index) {
+    return createClaudeSessionSnapshot(parseClaudeUsageChunk(readFileSync(path, 'utf8')));
   }
 
-  const latestUsage = usages.length > 0 ? usages[usages.length - 1].usage : {};
-  const latestInput = (latestUsage.input_tokens || 0)
-    + (latestUsage.cache_read_input_tokens || 0)
-    + (latestUsage.cache_creation_input_tokens || 0);
-  const latestOutput = latestUsage.output_tokens || 0;
+  const cachedEntry = index.getEntry(path);
+  const status = index.getStatus(path, stat);
 
-  return {
-    totalInput,
-    totalOutput,
-    totalCacheRead,
-    totalCacheCreate,
-    totalTokens: totalInput + totalOutput + totalCacheRead + totalCacheCreate,
-    latestInput,
-    latestOutput,
-    latestTotal: latestInput + latestOutput,
-    messageCount: usages.length,
-  };
+  if (status === 'unchanged' && cachedEntry?.payload?.kind === 'claude-usage') {
+    return cachedEntry.payload.snapshot;
+  }
+
+  let state = createClaudeUsageState();
+  let startOffset = 0;
+
+  if (status === 'append' && cachedEntry?.payload?.kind === 'claude-usage') {
+    state = {
+      model: cachedEntry.payload.snapshot.model || 'unknown',
+      latestTimestamp: cachedEntry.payload.snapshot.latestTimestamp || null,
+      latestUsage: cachedEntry.payload.latestUsage || {},
+      timeline: [...(cachedEntry.payload.snapshot.timeline || [])],
+      totals: { ...cachedEntry.payload.snapshot.totals },
+    };
+    startOffset = cachedEntry.offset || cachedEntry.size || 0;
+  }
+
+  parseClaudeUsageChunk(readFileChunkSync(path, startOffset), state);
+  const snapshot = createClaudeSessionSnapshot(state);
+  index.updateEntry(path, stat, {
+    kind: 'claude-usage',
+    latestUsage: state.latestUsage || {},
+    snapshot,
+  }, {
+    offset: stat.size,
+    latestTimestamp: snapshot.latestTimestamp,
+  });
+
+  return snapshot;
 }
 
 /**
@@ -168,13 +238,20 @@ function computeSessionTotals(usages) {
  * @property {number|undefined} startedAt
  * @property {string} kind
  * @property {string} model
+ * @property {Array<{timestamp: string, totalTokens: number}>} timeline
  * @property {SessionContext} context
  * @property {SessionTotals} totals
  */
 
 export function collectSessions(opts = {}) {
-  const { sessionsDir, projectsDir } = resolveClaudePaths(opts);
+  const { sessionsDir, projectsDir, configDir, useScanIndex } = resolveClaudePaths(opts);
   const sessions = [];
+  const scanIndex = useScanIndex ? createScanIndex({
+    name: 'claude',
+    version: CLAUDE_SCAN_INDEX_VERSION,
+    configDir,
+  }) : null;
+  const touchedPaths = [];
 
   if (!existsSync(sessionsDir)) return sessions;
 
@@ -192,16 +269,14 @@ export function collectSessions(opts = {}) {
     const pid = meta.pid || parseInt(basename(file, '.json'), 10);
     const alive = isPidAlive(pid);
     const jsonlInfo = findSessionJsonl(meta.sessionId, projectsDir);
-    let usages = [];
     let projectName = 'unknown';
+    let snapshot = createClaudeSessionSnapshot();
 
     if (jsonlInfo) {
-      usages = parseJsonlAllUsage(jsonlInfo.path);
+      snapshot = collectClaudeLogSnapshot(jsonlInfo.path, scanIndex);
       projectName = projectDirToName(jsonlInfo.projectDir);
+      touchedPaths.push(jsonlInfo.path);
     }
-
-    const context = computeContextBreakdown(usages);
-    const totals = computeSessionTotals(usages);
 
     sessions.push({
       sessionId: meta.sessionId,
@@ -212,10 +287,17 @@ export function collectSessions(opts = {}) {
       projectName,
       startedAt: meta.startedAt,
       kind: meta.kind || 'unknown',
-      model: usages.length > 0 ? usages[usages.length - 1].model : 'unknown',
-      context,
-      totals,
+      model: snapshot.model,
+      latestTimestamp: snapshot.latestTimestamp,
+      timeline: snapshot.timeline || [],
+      context: snapshot.context,
+      totals: snapshot.totals,
     });
+  }
+
+  if (scanIndex) {
+    scanIndex.pruneEntries(touchedPaths);
+    scanIndex.save();
   }
 
   sessions.sort((a, b) => {
@@ -248,12 +330,19 @@ export function collectProjectMetrics(opts = {}) {
     });
   }
 
+  metrics.sort((a, b) => (b.cost || 0) - (a.cost || 0));
   return metrics;
 }
 
 export function collectSessionsInRange(startMs, endMs, opts = {}) {
-  const { projectsDir } = resolveClaudePaths(opts);
+  const { projectsDir, configDir, useScanIndex } = resolveClaudePaths(opts);
   const results = [];
+  const scanIndex = useScanIndex ? createScanIndex({
+    name: 'claude',
+    version: CLAUDE_SCAN_INDEX_VERSION,
+    configDir,
+  }) : null;
+  const touchedPaths = [];
   if (!existsSync(projectsDir)) return results;
 
   try {
@@ -271,13 +360,14 @@ export function collectSessionsInRange(startMs, endMs, opts = {}) {
           const modified = stat.mtimeMs;
           if (modified < startMs || stat.birthtimeMs > endMs) continue;
 
-          const usages = parseJsonlAllUsage(fullPath);
-          if (usages.length === 0) continue;
+          const snapshot = collectClaudeLogSnapshot(fullPath, scanIndex);
+          if (snapshot.totals.messageCount === 0) continue;
+          touchedPaths.push(fullPath);
 
           results.push({
             sessionId: basename(file, '.jsonl'),
             projectName: projectDirToName(dir.name),
-            totals: computeSessionTotals(usages),
+            totals: snapshot.totals,
             fileModified: modified,
           });
         } catch {
@@ -287,6 +377,11 @@ export function collectSessionsInRange(startMs, endMs, opts = {}) {
     }
   } catch {
     // Ignore unreadable project directory.
+  }
+
+  if (scanIndex) {
+    scanIndex.pruneEntries(touchedPaths);
+    scanIndex.save();
   }
 
   return results;

@@ -1,3 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { resolveTokenGaugeConfigDir } from './scan-index.js';
+
 export const DEFAULT_REFRESH_INTERVAL = 15000;
 export const DEFAULT_AUTOCLEAR_MINUTES = 30;
 export const DEFAULT_PROVIDER = 'claude';
@@ -6,6 +10,7 @@ export const DEFAULT_HOST = 'standalone';
 export const DEFAULT_MODE = 'fullscreen';
 export const DEFAULT_FORMAT = 'ansi';
 export const DEFAULT_INLINE_ROWS = 1;
+export const DEFAULT_CONFIG_FILENAME = 'config.json';
 
 const PROVIDERS = new Set(['claude', 'codex']);
 const VIEW_MODES = new Set(['compact', 'detail']);
@@ -16,6 +21,42 @@ const FORMATS = new Set(['ansi', 'plain', 'json']);
 function findOption(args, name) {
   const idx = args.findIndex(arg => arg === name);
   return idx !== -1 ? args[idx + 1] : undefined;
+}
+
+function parsePositiveInt(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parsePositiveFloat(value, fallback) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseBoolean(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+    if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+export function resolveConfigFilePath({ configDir = null, configFilePath = null } = {}) {
+  if (configFilePath) return configFilePath;
+  return join(resolveTokenGaugeConfigDir(configDir), DEFAULT_CONFIG_FILENAME);
+}
+
+function loadConfigFile({ configDir = null, configFilePath = null } = {}) {
+  const path = resolveConfigFilePath({ configDir, configFilePath });
+
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 export function normalizeProvider(value) {
@@ -39,26 +80,41 @@ export function normalizeFormat(value) {
   return FORMATS.has(value) ? value : DEFAULT_FORMAT;
 }
 
-export function parseCliArgs(args) {
-  const interval = parseInt(findOption(args, '-i') || findOption(args, '--interval'), 10);
-  const autoClear = parseInt(findOption(args, '--autoclear'), 10);
-  const host = normalizeHost(findOption(args, '--host'));
-  const mode = normalizeMode(findOption(args, '--mode'), host);
-  const rows = parseInt(findOption(args, '--rows'), 10);
+export function parseCliArgs(args, opts = {}) {
+  const fileConfig = loadConfigFile(opts);
 
-  const budget = parseFloat(findOption(args, '--budget'));
+  const cliHost = findOption(args, '--host');
+  const cliMode = findOption(args, '--mode');
+  const host = normalizeHost(cliHost ?? fileConfig.host);
+  const mode = normalizeMode(cliMode ?? fileConfig.mode, host);
+  const cliInterval = findOption(args, '-i') || findOption(args, '--interval');
+  const cliAutoClear = findOption(args, '--autoclear');
+  const cliRows = findOption(args, '--rows');
+  const cliBudget = findOption(args, '--budget');
+  const cliProvider = findOption(args, '--provider');
+  const cliViewMode = findOption(args, '--view');
+  const cliFormat = findOption(args, '--format');
 
   return {
     host,
     mode,
-    format: normalizeFormat(findOption(args, '--format')),
-    rows: Number.isFinite(rows) && rows > 0 ? rows : DEFAULT_INLINE_ROWS,
-    refreshInterval: Number.isFinite(interval) && interval > 0 ? interval : DEFAULT_REFRESH_INTERVAL,
-    autoClearMinutes: Number.isFinite(autoClear) && autoClear > 0 ? autoClear : DEFAULT_AUTOCLEAR_MINUTES,
-    provider: normalizeProvider(findOption(args, '--provider')),
-    viewMode: normalizeViewMode(findOption(args, '--view')),
-    budget: Number.isFinite(budget) && budget > 0 ? budget : 0,
-    ascii: args.includes('--ascii'),
+    format: normalizeFormat(cliFormat ?? fileConfig.format),
+    rows: parsePositiveInt(cliRows ?? fileConfig.rows, DEFAULT_INLINE_ROWS),
+    refreshInterval: parsePositiveInt(
+      cliInterval ?? fileConfig.refreshInterval ?? fileConfig.interval,
+      DEFAULT_REFRESH_INTERVAL,
+    ),
+    autoClearMinutes: parsePositiveInt(
+      cliAutoClear ?? fileConfig.autoClearMinutes ?? fileConfig.autoclear,
+      DEFAULT_AUTOCLEAR_MINUTES,
+    ),
+    provider: normalizeProvider(cliProvider ?? fileConfig.provider),
+    viewMode: normalizeViewMode(cliViewMode ?? fileConfig.viewMode ?? fileConfig.view),
+    budget: parsePositiveFloat(cliBudget ?? fileConfig.budget, 0),
+    aggregateDir: typeof (fileConfig.aggregateDir ?? fileConfig.sharedWeeklyDir) === 'string'
+      ? (fileConfig.aggregateDir ?? fileConfig.sharedWeeklyDir).trim() || null
+      : null,
+    ascii: args.includes('--ascii') || parseBoolean(fileConfig.ascii, false),
     once: args.includes('--once'),
     help: args.includes('--help') || args.includes('-h'),
   };

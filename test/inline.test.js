@@ -10,6 +10,7 @@ test('renderInlineSnapshot renders one-line Claude output', () => {
     contextTokens: 7700,
     contextWindow: 200000,
     totalTokens: 15000,
+    cacheHitRate: 33.3,
     costUsd: 1.25,
     primaryLimit: { usedPercent: 41, resetsAt: 1775191480 },
   }, {
@@ -22,6 +23,7 @@ test('renderInlineSnapshot renders one-line Claude output', () => {
   assert.match(output, /\[TG\]/);
   assert.match(output, /token-gauge/);
   assert.match(output, /ctx 7\.7K\/200\.0K/);
+  assert.match(output, /cache 33%/);
   assert.match(output, /cost \$1\.25/);
   assert.ok(!output.includes('\n'));
 });
@@ -34,6 +36,7 @@ test('renderInlineSnapshot splits long output across rows when requested', () =>
     contextTokens: 24800,
     contextWindow: 258400,
     totalTokens: 83100,
+    cacheHitRate: 38.4,
     primaryLimit: { usedPercent: 22, resetsAt: 1775191480 },
     secondaryLimit: { usedPercent: 11, resetsAt: 1775634396 },
   }, {
@@ -46,6 +49,7 @@ test('renderInlineSnapshot splits long output across rows when requested', () =>
   const cleaned = stripAnsi(output);
   assert.equal(cleaned.split('\n').length, 2);
   assert.match(cleaned, /Matching tg thread/);
+  assert.match(cleaned, /cache 38%/);
   assert.match(cleaned, /5h 22%/);
   assert.match(cleaned, /7d 11%/);
 });

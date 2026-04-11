@@ -116,6 +116,10 @@ function buildSegments(snapshot, plain) {
     segments.push(`tok ${formatTokens(snapshot.totalTokens)}`);
   }
 
+  if (snapshot.cacheHitRate !== null && snapshot.cacheHitRate !== undefined) {
+    segments.push(`cache ${formatPercent(snapshot.cacheHitRate)}`);
+  }
+
   if (snapshot.costUsd !== null && snapshot.costUsd !== undefined) {
     segments.push(`cost ${formatCost(snapshot.costUsd)}`);
   }

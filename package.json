@@ -11,6 +11,7 @@
     "start": "node src/main.js",
     "dev": "node --watch src/main.js",
     "test": "node --test",
+    "bench:collectors": "node scripts/benchmark-collectors.js",
     "install:local": "./scripts/install-tg.sh",
     "install:dry-run": "./scripts/install-tg.sh --dry-run"
   },

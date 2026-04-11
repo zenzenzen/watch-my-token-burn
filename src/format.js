@@ -29,3 +29,11 @@ export function normalizeRateLimit(limit, percentKey = 'used_percent') {
   if (usedPercent === null && resetsAt === null) return null;
   return { usedPercent, resetsAt };
 }
+
+export function calculateCacheHitRate(inputTokens, cachedTokens) {
+  const fresh = Number(inputTokens) || 0;
+  const cached = Number(cachedTokens) || 0;
+  const total = fresh + cached;
+  if (total <= 0) return null;
+  return (cached / total) * 100;
+}

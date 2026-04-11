@@ -1,93 +1,190 @@
 # Watch My Token Burn
 
-A zero-dependency terminal dashboard that tracks token usage, context window consumption, and estimated costs for **Claude Code** and **OpenAI Codex** sessions in real time.
+A zero-dependency terminal dashboard for tracking token usage, context windows, rate limits, and cost signals for **Claude Code** and **OpenAI Codex** sessions.
 
-![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen) ![License](https://img.shields.io/badge/license-MIT-blue)
+The production implementation is still the Node.js app in `src/`. This repo now also includes:
 
-## 💸🔥 Why 🔥💸
+- a persisted scan index under `~/.config/token-gauge/` to avoid re-parsing unchanged `.jsonl` logs on every refresh
+- benchmark tooling for comparing indexed versus full rescans
+- contributor docs for the staged Go migration
+- an experimental Go workspace that mirrors the package boundaries we plan to port next
 
-I kept seeing memes about people's API bills looking like mortgage payments and thought "haha, couldn't be me" — and then it was me. I had no idea how fast tokens evaporate until I watched an Opus session mass-produce cache write tokens like it was getting paid by the million. (It was. By me.)
+## Why this exists
 
-So I built this. Not to stop the bleeding — let's be honest, I'm not going to stop — but to at least watch the money leave in real time with nice color-coded bars, like a gas gauge for my mass burn. It doesn't make it hurt less, but it does make it *aesthetic* 😎💸🔥💰🔥
+`token-gauge` reads local session logs directly from:
 
-Anyway, `token-gauge` reads session data directly from `~/.claude/` and `~/.codex/` and renders live dashboards so you too can experience the thrill of watching your context window fill up and your wallet empty out simultaneously.
+- `~/.claude/sessions/` and `~/.claude/projects/`
+- `~/.codex/session_index.jsonl` and `~/.codex/sessions/`
 
-💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸🔥💸
+It renders that data as either:
 
-## Features
+- a fullscreen terminal dashboard
+- an inline status/footer snapshot
+- structured JSON for hooks and scripts
 
-- **Fullscreen dashboard** — context window breakdown, session tokens, cost estimates, weekly usage chart
-- **Inline mode** — single- or multi-line summary for embedding in status bars
-- **Claude Code `statusLine` hook** — reads Claude's hook JSON from stdin and renders a footer
-- **Codex adapter** — same concept for OpenAI Codex sessions
-- **Model-aware pricing** — knows Opus 4.6, Sonnet 4.6, and Haiku 4.5 rates (input, output, cache read/write)
-- **Weekly tracker** — persists daily token aggregates to `~/.config/token-gauge/weekly.json`
-- **Zero dependencies** — pure Node.js, no npm install required to run
-- **ASCII fallback** — auto-detects non-UTF-8 locales and degrades gracefully
+Runtime defaults can now also come from `~/.config/token-gauge/config.json`, with CLI flags taking precedence over the config file.
 
-## Quick Start
+## Current architecture
+
+| Module | Role |
+|--------|------|
+| `src/collector.js` | Claude collector, project billing lookup, and indexed `.jsonl` aggregation |
+| `src/codex.js` | Codex collector and indexed session-log parsing |
+| `src/scan-index.js` | Versioned persisted scan index used to skip unchanged files and parse append-only deltas |
+| `src/tracker.js` | Claude weekly persistence and actual-cost fallback from `~/.claude.json` |
+| `src/codex-tracker.js` | Codex weekly persistence and estimated-cost aggregation |
+| `src/snapshot.js` | Shared snapshot schema for inline mode and hook adapters |
+| `src/ui.js` | Fullscreen TUI renderer |
+| `src/inline.js` | Inline/status-line renderer |
+| `src/state.js` | CLI parsing, config-file loading, and keyboard state transitions |
+| `src/main.js` | Entry point routing for standalone mode and hook mode |
+
+The deeper migration notes live in:
+
+- [CLAUDE.md](./CLAUDE.md)
+- [Architecture And Go Migration](./docs/architecture-and-go-migration.md)
+- [Roadmap](./docs/roadmap.md)
+
+## Indexed scan strategy
+
+The hot path is Codex log parsing, not terminal rendering. To reduce refresh overhead:
+
+- each provider keeps a versioned scan index in `~/.config/token-gauge/`
+- unchanged files are reused without reopening the log
+- append-only files are parsed from the last indexed byte offset
+- truncated, rotated, deleted, or version-mismatched files are rebuilt file-by-file
+
+The first run can still be expensive. The steady-state goal is fast repeated refreshes without changing the user-facing output contract.
+
+## Quick start
 
 ```sh
-# Run directly (no install)
 git clone https://github.com/zenzenzen/watch-my-token-burn.git
 cd watch-my-token-burn
 node src/main.js
+```
 
-# Or install globally for the `tg` shortcut
+Or install globally for `tg`:
+
+```sh
 npm install -g .
 tg
 ```
 
 ## Usage
 
-```
+```text
 token-gauge [options]
 
-Options:
-  --host <name>        standalone | claude | codex    (default: standalone)
-  --mode <name>        fullscreen | inline            (default: fullscreen)
-  --format <name>      ansi | plain | json            (default: ansi)
-  --rows <n>           Inline output rows             (default: 1)
-  --provider <name>    Initial tab: claude | codex    (default: claude)
-  --ascii              Force ASCII-safe rendering
-  --once               Print once and exit
-  --watch              Keep refreshing inline mode
-  -i, --interval <ms>  Refresh interval               (default: 15000)
-  --autoclear <min>    Auto-clear stale sessions       (default: 30)
-  --view <mode>        compact | detail                (default: compact)
-  -h, --help           Show help
+Common options:
+  --host <name>          standalone | claude | codex
+  --mode <name>          fullscreen | inline
+  --format <name>        ansi | plain | json
+  --rows <n>             Inline output rows
+  --provider <name>      Initial provider tab: claude | codex
+  --ascii                Force ASCII-safe rendering
+  --once                 Print once and exit
+  -h, --help             Show help
+
+Standalone fullscreen options:
+  -i, --interval <ms>    Refresh interval in ms
+  --autoclear <min>      Auto-clear stale Claude sessions
+  --view <mode>          compact | detail
+  --budget <amount>      Budget target in USD
 ```
 
-### Fullscreen Dashboard
+### Config file
+
+`token-gauge` will read defaults from:
+
+```text
+~/.config/token-gauge/config.json
+```
+
+Precedence is:
+
+- CLI flags
+- config file values
+- built-in defaults
+
+Example:
+
+```json
+{
+  "provider": "codex",
+  "viewMode": "detail",
+  "refreshInterval": 5000,
+  "budget": 50,
+  "aggregateDir": "/Users/dev/Dropbox/token-gauge-shared",
+  "ascii": false
+}
+```
+
+Supported keys mirror the main CLI settings, including:
+
+- `host`
+- `mode`
+- `format`
+- `rows`
+- `provider`
+- `view` or `viewMode`
+- `interval` or `refreshInterval`
+- `autoclear` or `autoClearMinutes`
+- `budget`
+- `aggregateDir` or `sharedWeeklyDir`
+- `ascii`
+
+### Multi-machine weekly aggregation
+
+To combine weekly summaries across multiple machines, point each machine at the same shared directory in `config.json`:
+
+```json
+{
+  "aggregateDir": "/Users/dev/Dropbox/token-gauge-shared"
+}
+```
+
+When this is set:
+
+- each machine still keeps its own local weekly files under `~/.config/token-gauge/`
+- Claude mirrors to `claude-weekly-<machine>.json`
+- Codex mirrors to `codex-weekly-<machine>.json`
+- the weekly summary panels merge those machine files into one aggregate view
+
+Claude billed cost remains local-only, so aggregated Claude weekly views intentionally fall back to estimated cost across machines.
+
+### Fullscreen examples
 
 ```sh
-tg                          # default: compact view, Claude tab
-tg --view detail            # detailed view with context bars and weekly chart
-tg --provider codex         # start on the Codex tab
+tg
+tg --view detail
+tg --provider codex
+tg --budget 50
 ```
 
-**Keyboard shortcuts:**
-
-| Key | Action |
-|-----|--------|
-| `q` / `Ctrl+C` | Quit |
-| `r` / `Space` | Force refresh |
-| `v` | Toggle compact/detail |
-| `[` / `]` | Switch Claude/Codex tabs |
-| `c` | Clear stale sessions (Claude detail only) |
-
-### Inline Mode
+### Inline examples
 
 ```sh
-tg --mode inline --once                    # one-shot snapshot
-tg --mode inline --watch                   # live-updating strip
-tg --mode inline --provider codex --once   # Codex snapshot
-tg --mode inline --format json             # structured output
+tg --mode inline --once
+tg --mode inline --provider codex --format plain
+tg --mode inline --format json --once
 ```
 
-### Claude Code Status Line
+### Standalone JSON export
 
-Wire `token-gauge` into Claude Code's footer by adding this to `~/.claude/settings.json`:
+```sh
+tg --once --format json
+```
+
+This emits the full standalone state blob, including:
+
+- Claude sessions
+- Claude project billing metrics
+- Claude weekly summary
+- Codex active/recent session state
+- Codex weekly summary
+
+### Claude Code status line
 
 ```json
 {
@@ -98,61 +195,45 @@ Wire `token-gauge` into Claude Code's footer by adding this to `~/.claude/settin
 }
 ```
 
-Or run the installer to set it up automatically:
-
-```sh
-./scripts/install-tg.sh
-```
-
-The installer:
-1. Installs `tg` globally via npm
-2. Configures Claude Code's `statusLine` in `~/.claude/settings.json`
-3. Stages a Codex adapter snippet in `~/.codex/`
-
-Use `--dry-run` to preview what it would do, or `--claude-only` / `--codex-only` to target one host.
-
-### Codex Adapter
-
-Pipe Codex hook JSON through stdin:
+### Codex hook adapter
 
 ```sh
 echo '{"session_id":"s1","context_window":{"current_tokens":24800,"context_window_size":258400},"usage":{"total_tokens":83100}}' \
   | tg --host codex --mode inline --rows 2 --format plain
 ```
 
-## How It Works
+## Benchmarks and tests
 
-| Module | Role |
-|--------|------|
-| `src/collector.js` | Reads Claude session metadata from `~/.claude/sessions/` and parses `.jsonl` logs for token usage |
-| `src/codex.js` | Reads Codex session data from `~/.codex/sessions/` and the session index |
-| `src/snapshot.js` | Normalizes session data into a unified snapshot shape for both local and hook modes |
-| `src/tracker.js` | Persists and queries 7-day rolling token aggregates |
-| `src/ui.js` | Renders the fullscreen TUI (compact + detail views, powerline segments, context bars) |
-| `src/inline.js` | Renders the compact inline/status-line output |
-| `src/state.js` | CLI argument parsing, input handling, state transitions |
-| `src/main.js` | Entry point — routes to fullscreen app, inline app, or hook adapter |
-
-## Model Pricing
-
-Built-in rates used for cost estimates (per 1M tokens):
-
-| Model | Input | Output | Cache Read | Cache Write |
-|-------|-------|--------|------------|-------------|
-| Opus 4.6 | $15 | $75 | $1.875 | $18.75 |
-| Sonnet 4.6 | $3 | $15 | $0.375 | $3.75 |
-| Haiku 4.5 | $0.80 | $4 | $0.08 | $1 |
-
-## Tests
+Run the test suite:
 
 ```sh
 node --test
 ```
 
+Compare full rescans with indexed steady-state collection:
+
+```sh
+npm run bench:collectors
+```
+
+## Go migration status
+
+This repo now includes an **experimental Go workspace**:
+
+- `cmd/token-gauge`
+- `internal/config`
+- `internal/scanindex`
+- `internal/snapshot`
+
+It is intentionally not the default runtime yet. The Node.js implementation remains the reference behavior until Go collector, snapshot, inline, and TUI parity land.
+
+The Go workspace is there so contributors can start learning and porting the architecture in the planned sequence instead of waiting for a big-bang rewrite.
+
 ## Requirements
 
-- Node.js >= 18
-- macOS or Linux (reads `~/.claude/` and `~/.codex/` directories)
+- Node.js `>= 18`
+- Go `>= 1.22` if you want to explore the experimental Go workspace
+- macOS or Linux with local Claude/Codex session directories
 
 ## License
 

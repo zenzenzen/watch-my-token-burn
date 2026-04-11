@@ -1,7 +1,11 @@
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { basenameLabel, normalizeRateLimit } from './format.js';
+import { createScanIndex, readFileChunkSync } from './scan-index.js';
+
+const CODEX_SCAN_INDEX_VERSION = 2;
+const CODEX_TIMELINE_LIMIT = 48;
 
 function resolveCodexPaths(opts = {}) {
   const codexDir = opts.codexDir || join(homedir(), '.codex');
@@ -9,6 +13,8 @@ function resolveCodexPaths(opts = {}) {
     codexDir,
     sessionsDir: join(codexDir, 'sessions'),
     sessionIndexPath: join(codexDir, 'session_index.jsonl'),
+    configDir: opts.configDir || null,
+    useScanIndex: opts.useScanIndex !== false,
   };
 }
 
@@ -81,13 +87,33 @@ function parseTokenCount(payload) {
   return { info, rateLimits };
 }
 
-export function parseCodexSessionLog(content) {
-  const parsed = {
-    meta: null,
-    latestTimestamp: null,
-    tokenInfo: null,
-    rateLimits: null,
+function createParsedCodexState(base = {}) {
+  return {
+    meta: base.meta || null,
+    latestTimestamp: base.latestTimestamp || null,
+    tokenInfo: base.tokenInfo || null,
+    rateLimits: base.rateLimits || null,
+    timeline: Array.isArray(base.timeline) ? [...base.timeline] : [],
   };
+}
+
+function pushCodexTimelinePoint(timeline, timestamp, totalTokens) {
+  if (!timestamp || !Number.isFinite(totalTokens)) return;
+
+  const last = timeline[timeline.length - 1];
+  if (last && last.totalTokens === totalTokens) {
+    last.timestamp = timestamp;
+    return;
+  }
+
+  timeline.push({ timestamp, totalTokens });
+  if (timeline.length > CODEX_TIMELINE_LIMIT) {
+    timeline.splice(0, timeline.length - CODEX_TIMELINE_LIMIT);
+  }
+}
+
+export function parseCodexSessionLog(content, base = {}) {
+  const parsed = createParsedCodexState(base);
 
   for (const rawLine of content.split('\n')) {
     if (!rawLine.trim()) continue;
@@ -110,10 +136,44 @@ export function parseCodexSessionLog(content) {
       const tokenCount = parseTokenCount(line.payload);
       if (tokenCount.info) parsed.tokenInfo = tokenCount.info;
       if (tokenCount.rateLimits) parsed.rateLimits = tokenCount.rateLimits;
+      const totalTokens = tokenCount.info?.total_token_usage?.total_tokens;
+      if (Number.isFinite(totalTokens)) {
+        pushCodexTimelinePoint(parsed.timeline, line.timestamp || parsed.latestTimestamp, totalTokens);
+      }
     }
   }
 
   return parsed;
+}
+
+function collectCodexSessionRecord(filePath, indexEntry, scanIndex = null) {
+  if (!scanIndex) {
+    return buildSessionRecord(parseCodexSessionLog(safeReadText(filePath)), indexEntry, filePath);
+  }
+
+  const stat = statSync(filePath);
+  const cachedEntry = scanIndex.getEntry(filePath);
+  const status = scanIndex.getStatus(filePath, stat);
+
+  if (status === 'unchanged' && cachedEntry?.payload?.kind === 'codex-session') {
+    return buildSessionRecord(cachedEntry.payload.parsed, indexEntry, filePath);
+  }
+
+  const base = status === 'append' && cachedEntry?.payload?.kind === 'codex-session'
+    ? createParsedCodexState(cachedEntry.payload.parsed)
+    : createParsedCodexState();
+  const startOffset = status === 'append' && cachedEntry ? (cachedEntry.offset || cachedEntry.size || 0) : 0;
+  const parsed = parseCodexSessionLog(readFileChunkSync(filePath, startOffset), base);
+
+  scanIndex.updateEntry(filePath, stat, {
+    kind: 'codex-session',
+    parsed,
+  }, {
+    offset: stat.size,
+    latestTimestamp: parsed.latestTimestamp || null,
+  });
+
+  return buildSessionRecord(parsed, indexEntry, filePath);
 }
 
 function buildFileMap(sessionsDir) {
@@ -131,6 +191,7 @@ function buildFallbackRecord(indexEntry) {
     threadName: indexEntry.thread_name || indexEntry.id.slice(0, 8),
     cwd: '',
     workspaceLabel: 'unknown',
+    startedAt: indexEntry.updated_at || null,
     latestTimestamp: indexEntry.updated_at || null,
     providerLabel: 'OpenAI Codex',
     modelLabel: 'Codex',
@@ -147,6 +208,7 @@ function buildFallbackRecord(indexEntry) {
     currentContextTokens: 0,
     modelContextWindow: 0,
     rateLimits: null,
+    timeline: [],
     liveDataFound: false,
     filePath: null,
   };
@@ -170,7 +232,8 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
     threadName: indexEntry.thread_name || basenameLabel(parsed.meta.cwd) || (parsed.meta.id || '').slice(0, 8),
     cwd: parsed.meta.cwd || '',
     workspaceLabel: basenameLabel(parsed.meta.cwd),
-    latestTimestamp: indexEntry.updated_at || parsed.latestTimestamp || parsed.meta.timestamp || null,
+    startedAt: parsed.meta.timestamp || parsed.timeline[0]?.timestamp || indexEntry.updated_at || null,
+    latestTimestamp: parsed.latestTimestamp || indexEntry.updated_at || parsed.meta.timestamp || null,
     providerLabel: formatProviderLabel(parsed.meta.model_provider),
     modelLabel: 'Codex',
     totalTokens: totalUsage.total_tokens || 0,
@@ -191,6 +254,7 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
           secondary: normalizeRateLimit(parsed.rateLimits.secondary),
         }
       : null,
+    timeline: parsed.timeline || [],
     liveDataFound: Boolean(parsed.tokenInfo || parsed.rateLimits),
     filePath,
   };
@@ -206,6 +270,7 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
  * @property {string} threadName
  * @property {string} cwd
  * @property {string} workspaceLabel
+ * @property {string|null} startedAt
  * @property {string|null} latestTimestamp
  * @property {string} providerLabel
  * @property {string} modelLabel
@@ -222,6 +287,7 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
  * @property {number} currentContextTokens
  * @property {number} modelContextWindow
  * @property {{ primary: NormalizedRateLimit|null, secondary: NormalizedRateLimit|null }|null} rateLimits
+ * @property {Array<{timestamp: string, totalTokens: number}>} timeline
  * @property {boolean} liveDataFound
  * @property {string|null} filePath
  */
@@ -237,26 +303,45 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
  */
 
 export function collectAllCodexSessions(opts = {}) {
-  const { sessionsDir, sessionIndexPath } = resolveCodexPaths(opts);
+  const { sessionsDir, sessionIndexPath, configDir, useScanIndex } = resolveCodexPaths(opts);
   const indexEntries = safeJsonLines(sessionIndexPath)
     .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
   const filesById = buildFileMap(sessionsDir);
+  const scanIndex = useScanIndex ? createScanIndex({
+    name: 'codex',
+    version: CODEX_SCAN_INDEX_VERSION,
+    configDir,
+  }) : null;
+  const touchedPaths = [];
 
-  return indexEntries.map(entry => {
+  const sessions = indexEntries.map(entry => {
     const filePath = filesById.get(entry.id);
     if (!filePath) return buildFallbackRecord(entry);
-    const parsed = parseCodexSessionLog(safeReadText(filePath));
-    return buildSessionRecord(parsed, entry, filePath);
+    touchedPaths.push(filePath);
+    return collectCodexSessionRecord(filePath, entry, scanIndex);
   });
+
+  if (scanIndex) {
+    scanIndex.pruneEntries(touchedPaths);
+    scanIndex.save();
+  }
+
+  return sessions;
 }
 
 export function collectCodexData(opts = {}) {
-  const { sessionsDir, sessionIndexPath } = resolveCodexPaths(opts);
+  const { sessionsDir, sessionIndexPath, configDir, useScanIndex } = resolveCodexPaths(opts);
   const cwd = opts.cwd || process.cwd();
   const indexEntries = safeJsonLines(sessionIndexPath)
     .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
   const filesById = buildFileMap(sessionsDir);
   const cache = new Map();
+  const scanIndex = useScanIndex ? createScanIndex({
+    name: 'codex',
+    version: CODEX_SCAN_INDEX_VERSION,
+    configDir,
+  }) : null;
+  const touchedPaths = [];
 
   function getRecord(indexEntry) {
     if (cache.has(indexEntry.id)) return cache.get(indexEntry.id);
@@ -268,8 +353,8 @@ export function collectCodexData(opts = {}) {
       return fallback;
     }
 
-    const parsed = parseCodexSessionLog(safeReadText(filePath));
-    const record = buildSessionRecord(parsed, indexEntry, filePath);
+    touchedPaths.push(filePath);
+    const record = collectCodexSessionRecord(filePath, indexEntry, scanIndex);
     cache.set(indexEntry.id, record);
     return record;
   }
@@ -308,6 +393,11 @@ export function collectCodexData(opts = {}) {
     allTotalInputTokens += record.totalInputTokens;
     allTotalOutputTokens += record.totalOutputTokens;
     allTotalCachedInputTokens += record.totalCachedInputTokens;
+  }
+
+  if (scanIndex) {
+    scanIndex.pruneEntries(touchedPaths);
+    scanIndex.save();
   }
 
   return {

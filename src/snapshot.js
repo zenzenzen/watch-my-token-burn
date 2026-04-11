@@ -2,7 +2,8 @@ import { collectSessions } from './collector.js';
 import { collectCodexData } from './codex.js';
 import { refreshWeeklyData } from './tracker.js';
 import { MODEL_PRICING } from './pricing.js';
-import { formatModelName, basenameLabel, primaryClaudeSession, normalizeRateLimit } from './format.js';
+import { loadClaudeRateLimitCache } from './claude-rate-limits.js';
+import { calculateCacheHitRate, formatModelName, basenameLabel, primaryClaudeSession, normalizeRateLimit } from './format.js';
 
 function getClaudeSessionCost(model, totals) {
   const pricing = MODEL_PRICING[model] || MODEL_PRICING.default;
@@ -18,7 +19,15 @@ function sum(values) {
   return values.reduce((total, value) => total + (Number(value) || 0), 0);
 }
 
-export function createClaudeLocalSnapshot(sessions, weeklyData) {
+function getClaudeCacheHitRate(totals) {
+  return calculateCacheHitRate(totals?.totalInput, totals?.totalCacheRead);
+}
+
+function getCodexCacheHitRate(totals) {
+  return calculateCacheHitRate(totals?.totalInputTokens, totals?.totalCachedInputTokens);
+}
+
+export function createClaudeLocalSnapshot(sessions, weeklyData, rateLimitCache = null) {
   const primary = primaryClaudeSession(sessions);
   if (!primary) {
     return {
@@ -34,8 +43,9 @@ export function createClaudeLocalSnapshot(sessions, weeklyData) {
       contextTokens: 0,
       contextWindow: 200_000,
       costUsd: weeklyData?.estimatedCost ?? null,
-      primaryLimit: null,
-      secondaryLimit: null,
+      cacheHitRate: null,
+      primaryLimit: rateLimitCache?.primary ?? null,
+      secondaryLimit: rateLimitCache?.secondary ?? null,
     };
   }
 
@@ -56,13 +66,15 @@ export function createClaudeLocalSnapshot(sessions, weeklyData) {
     contextWindow: 200_000,
     lastTokens: primary.totals.latestTotal,
     costUsd: getClaudeSessionCost(primary.model, primary.totals),
-    primaryLimit: null,
-    secondaryLimit: null,
+    cacheHitRate: getClaudeCacheHitRate(primary.totals),
+    primaryLimit: rateLimitCache?.primary ?? null,
+    secondaryLimit: rateLimitCache?.secondary ?? null,
     meta: {
       sessionCount: sessions.length,
       activeCount: sessions.filter(session => session.alive).length,
       weeklyTokens: weeklyData?.totalTokens ?? 0,
       weeklyCostUsd: weeklyData?.estimatedCost ?? null,
+      rateLimitUpdatedAt: rateLimitCache?.updatedAt ?? null,
     },
   };
 }
@@ -83,6 +95,7 @@ export function createCodexLocalSnapshot(codexData) {
       contextTokens: 0,
       contextWindow: 0,
       costUsd: null,
+      cacheHitRate: null,
       primaryLimit: null,
       secondaryLimit: null,
     };
@@ -105,6 +118,7 @@ export function createCodexLocalSnapshot(codexData) {
     contextWindow: active.modelContextWindow || 0,
     lastTokens: active.lastTokens || 0,
     costUsd: null,
+    cacheHitRate: getCodexCacheHitRate(active),
     primaryLimit: active.rateLimits?.primary ?? null,
     secondaryLimit: active.rateLimits?.secondary ?? null,
     meta: {
@@ -120,7 +134,8 @@ export function collectLocalSnapshot({ provider = 'claude', cwd = process.cwd() 
 
   const sessions = collectSessions();
   const weeklyData = refreshWeeklyData();
-  return createClaudeLocalSnapshot(sessions, weeklyData);
+  const rateLimitCache = loadClaudeRateLimitCache();
+  return createClaudeLocalSnapshot(sessions, weeklyData, rateLimitCache);
 }
 
 function getContextUsageTotal(contextWindow) {
@@ -148,6 +163,11 @@ function getTokenTotalsFromClaudeHook(hookData) {
   };
 }
 
+function getClaudeHookCacheHitRate(hookData) {
+  const usage = hookData.context_window?.current_usage || {};
+  return calculateCacheHitRate(usage.input_tokens, usage.cache_read_input_tokens);
+}
+
 export function createClaudeHookSnapshot(hookData) {
   const totals = getTokenTotalsFromClaudeHook(hookData);
   const cwd = hookData.workspace?.current_dir || hookData.cwd || '';
@@ -168,6 +188,7 @@ export function createClaudeHookSnapshot(hookData) {
     contextTokens: totals.contextTokens,
     contextWindow: totals.contextWindow,
     costUsd: hookData.cost?.total_cost_usd ?? null,
+    cacheHitRate: getClaudeHookCacheHitRate(hookData),
     primaryLimit: normalizeRateLimit(hookData.rate_limits?.five_hour, 'used_percentage'),
     secondaryLimit: normalizeRateLimit(hookData.rate_limits?.seven_day, 'used_percentage'),
     meta: {
@@ -211,6 +232,16 @@ function getCodexTotalTokens(hookData) {
   };
 }
 
+function getCodexHookCacheHitRate(hookData) {
+  const usage = hookData.usage || hookData.tokens || {};
+  if (usage.input_tokens !== undefined || usage.cached_input_tokens !== undefined) {
+    return calculateCacheHitRate(usage.input_tokens, usage.cached_input_tokens);
+  }
+
+  const currentUsage = hookData.context_window?.current_usage || {};
+  return calculateCacheHitRate(currentUsage.input_tokens, currentUsage.cached_input_tokens);
+}
+
 export function createCodexHookSnapshot(hookData) {
   if (hookData?.version === 1 && hookData.provider === 'codex') {
     return { ...hookData, host: 'codex' };
@@ -236,6 +267,7 @@ export function createCodexHookSnapshot(hookData) {
     contextWindow: totals.contextWindow,
     lastTokens: totals.lastTokens,
     costUsd: hookData.cost?.total_cost_usd ?? null,
+    cacheHitRate: getCodexHookCacheHitRate(hookData),
     primaryLimit: getCodexRateLimit(hookData.rate_limits, 'primary'),
     secondaryLimit: getCodexRateLimit(hookData.rate_limits, 'secondary'),
     meta: {
