@@ -1,5 +1,6 @@
+import { stripAnsi } from './format.js';
+
 const ESC = '\x1b[';
-const ANSI_REGEX = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 const THEME = {
   claude: { brand: 205, accent: 39, soft: 221, ok: 49, dim: 245 },
@@ -18,9 +19,7 @@ const RESET = `${ESC}0m`;
 const DIM = `${ESC}2m`;
 const BOLD = `${ESC}1m`;
 
-export function stripAnsi(value) {
-  return String(value || '').replace(ANSI_REGEX, '');
-}
+export { stripAnsi };
 
 function visibleLength(value) {
   return stripAnsi(value).length;
