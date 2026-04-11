@@ -501,18 +501,7 @@ function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii
 
   if (weeklyData) {
     lines.push(`  ${C.dim}Total:${C.reset} ${C.bold}${formatTokens(weeklyData.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${weeklyData.sessionCount}${C.reset} sessions  ${C.dim}|${C.reset}  ${C.bold}${formatCost(weeklyData.estimatedCost)}${C.reset} est.`);
-    if (weeklyData.daily?.length > 0) {
-      const maxDaily = Math.max(...weeklyData.daily.map(day => day.tokens), 1);
-      const dayBarWidth = Math.max(10, barWidth - 10);
-      lines.push('');
-      for (const day of weeklyData.daily) {
-        const filled = Math.max(0, Math.round((day.tokens / maxDaily) * dayBarWidth));
-        const empty = dayBarWidth - filled;
-        const bar = `${C.bgBlue}${' '.repeat(filled)}${C.reset}${C.bgDarker}${' '.repeat(empty)}${C.reset}`;
-        const today = day.isToday ? `${C.green} ${g.today}${C.reset}` : '';
-        lines.push(`  ${C.dim}${day.label.padEnd(5)}${C.reset} ${bar} ${C.dim}${formatTokens(day.tokens)}${C.reset}${today}`);
-      }
-    }
+    renderWeeklyChart(lines, weeklyData, barWidth, g);
   } else {
     lines.push(`  ${C.dim}No weekly data available yet.${C.reset}`);
   }
@@ -522,6 +511,20 @@ function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii
   lines.push(renderFooter(width, 'claude', 'detail'));
   lines.push('');
   return lines.map(line => fitAnsiLine(line, screenWidth)).join('\n');
+}
+
+function renderWeeklyChart(lines, weeklyData, barWidth, g) {
+  if (!weeklyData.daily?.length) return;
+  const maxDaily = Math.max(...weeklyData.daily.map(day => day.tokens), 1);
+  const dayBarWidth = Math.max(10, barWidth - 10);
+  lines.push('');
+  for (const day of weeklyData.daily) {
+    const filled = Math.max(0, Math.round((day.tokens / maxDaily) * dayBarWidth));
+    const empty = dayBarWidth - filled;
+    const bar = `${C.bgBlue}${' '.repeat(filled)}${C.reset}${C.bgDarker}${' '.repeat(empty)}${C.reset}`;
+    const today = day.isToday ? `${C.green} ${g.today}${C.reset}` : '';
+    lines.push(`  ${C.dim}${day.label.padEnd(5)}${C.reset} ${bar} ${C.dim}${formatTokens(day.tokens)}${C.reset}${today}`);
+  }
 }
 
 function renderRateLimitPanel(lines, title, rateLimit, width, colorBg, nowMs) {
@@ -549,7 +552,7 @@ function renderCodexSummaryStrip(active, ascii) {
   ], ascii);
 }
 
-function renderCodexDetail(codexData, width, screenWidth, now, ascii, budget = 0) {
+function renderCodexDetail(codexData, width, screenWidth, now, ascii, budget = 0, codexWeeklyData = null) {
   const lines = [];
   const active = codexData?.activeSession || null;
   const barWidth = Math.max(30, width - 22);
@@ -618,6 +621,17 @@ function renderCodexDetail(codexData, width, screenWidth, now, ascii, budget = 0
   }
 
   lines.push('');
+  lines.push(`  ${horizontalLine(width - 2)}`);
+  lines.push(`  ${C.bold}${C.cyan}WEEKLY SUMMARY${C.reset}`);
+
+  if (codexWeeklyData) {
+    lines.push(`  ${C.dim}Total:${C.reset} ${C.bold}${formatTokens(codexWeeklyData.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${codexWeeklyData.sessionCount}${C.reset} sessions  ${C.dim}|${C.reset}  ${C.bold}${formatCost(codexWeeklyData.estimatedCost)}${C.reset} est.`);
+    renderWeeklyChart(lines, codexWeeklyData, barWidth, g);
+  } else {
+    lines.push(`  ${C.dim}No weekly data available yet.${C.reset}`);
+  }
+
+  lines.push('');
   lines.push(`  ${horizontalLine(width - 2, g.line)}`);
   lines.push(renderFooter(width, 'codex', 'detail'));
   lines.push('');
@@ -644,7 +658,7 @@ export function renderDashboard(state) {
   }
 
   if (state.provider === 'codex') {
-    return renderCodexDetail(state.codexData || null, width, screenWidth, now, ascii, budget);
+    return renderCodexDetail(state.codexData || null, width, screenWidth, now, ascii, budget, state.codexWeeklyData || null);
   }
 
   return renderClaudeDetail(state.claudeSessions || [], state.claudeWeeklyData || null, width, screenWidth, now, ascii, budget);
