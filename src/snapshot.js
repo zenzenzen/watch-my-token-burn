@@ -1,28 +1,8 @@
-import { basename } from 'node:path';
 import { collectSessions } from './collector.js';
 import { collectCodexData } from './codex.js';
 import { refreshWeeklyData } from './tracker.js';
-
-const MODEL_PRICING = {
-  'claude-opus-4-6': { input: 15, output: 75, cacheRead: 1.875, cacheWrite: 18.75 },
-  'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.375, cacheWrite: 3.75 },
-  'claude-haiku-4-5-20251001': { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
-  default: { input: 15, output: 75, cacheRead: 1.875, cacheWrite: 18.75 },
-};
-
-function basenameLabel(path) {
-  if (!path) return 'unknown';
-  const trimmed = path.replace(/\/+$/, '');
-  return basename(trimmed) || trimmed;
-}
-
-function formatModelName(model) {
-  if (model === 'claude-opus-4-6') return 'Opus 4.6';
-  if (model === 'claude-sonnet-4-6') return 'Sonnet 4.6';
-  if (model === 'claude-haiku-4-5-20251001') return 'Haiku 4.5';
-  if (!model || model === 'unknown') return 'unknown';
-  return model.replace(/^claude-/, '').replace(/-/g, ' ');
-}
+import { MODEL_PRICING } from './pricing.js';
+import { formatModelName, basenameLabel, primaryClaudeSession } from './format.js';
 
 function getClaudeSessionCost(model, totals) {
   const pricing = MODEL_PRICING[model] || MODEL_PRICING.default;
@@ -44,10 +24,6 @@ function normalizeRateLimit(limit, percentKey = 'used_percent') {
   const resetsAt = limit.resets_at ?? null;
   if (usedPercent === null && resetsAt === null) return null;
   return { usedPercent, resetsAt };
-}
-
-function primaryClaudeSession(sessions) {
-  return sessions.find(session => session.alive) || sessions[0] || null;
 }
 
 export function createClaudeLocalSnapshot(sessions, weeklyData) {

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
+import { basenameLabel } from './format.js';
 
 function resolveCodexPaths(opts = {}) {
   const codexDir = opts.codexDir || join(homedir(), '.codex');
@@ -73,11 +74,6 @@ function formatProviderLabel(value) {
   return `${value.slice(0, 1).toUpperCase()}${value.slice(1)} Codex`;
 }
 
-function basenameLabel(path) {
-  if (!path) return 'unknown';
-  const normalized = path.replace(/\/+$/, '');
-  return normalized.split('/').pop() || normalized;
-}
 
 function parseTokenCount(payload) {
   const info = payload?.info || null;

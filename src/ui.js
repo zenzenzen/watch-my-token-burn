@@ -1,3 +1,6 @@
+import { MODEL_PRICING, CODEX_PRICING } from './pricing.js';
+import { formatModelName, basenameLabel, stripAnsi, primaryClaudeSession } from './format.js';
+
 const ESC = '\x1b[';
 
 function fgRgb(r, g, b) {
@@ -73,17 +76,6 @@ const MODEL_CONTEXT_LIMITS = {
   default: 200_000,
 };
 
-const MODEL_PRICING = {
-  'claude-opus-4-6': { input: 15, output: 75, cacheRead: 1.875, cacheWrite: 18.75 },
-  'claude-sonnet-4-6': { input: 3, output: 15, cacheRead: 0.375, cacheWrite: 3.75 },
-  'claude-haiku-4-5-20251001': { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1 },
-  default: { input: 15, output: 75, cacheRead: 1.875, cacheWrite: 18.75 },
-};
-
-const CODEX_PRICING = {
-  // OpenAI o4-mini pricing per 1M tokens (default for Codex CLI)
-  default: { input: 1.1, output: 4.4, cacheRead: 0.275 },
-};
 
 function getCodexSessionCost(session) {
   const pricing = CODEX_PRICING.default;
@@ -143,13 +135,6 @@ function formatTime(date) {
   return date.toLocaleTimeString('en-US', { hour12: false });
 }
 
-function formatModelName(model) {
-  if (model === 'claude-opus-4-6') return 'Opus 4.6';
-  if (model === 'claude-sonnet-4-6') return 'Sonnet 4.6';
-  if (model === 'claude-haiku-4-5-20251001') return 'Haiku 4.5';
-  if (!model || model === 'unknown') return 'unknown';
-  return model.replace(/^claude-/, '').replace(/-/g, ' ');
-}
 
 function truncateText(text, max, ascii = false) {
   if (!text) return '';
@@ -180,9 +165,6 @@ function sessionStatus(session) {
   return { label: 'ENDED', color: THEME.panelSoft, fg: THEME.text };
 }
 
-function primaryClaudeSession(sessions) {
-  return sessions.find(session => session.alive) || sessions[0] || null;
-}
 
 function glyphs(ascii) {
   return ascii
@@ -208,9 +190,6 @@ function horizontalLine(width, char = '\u2500') {
   return `${C.line}${char.repeat(Math.max(0, width))}${C.reset}`;
 }
 
-function stripAnsi(str) {
-  return str.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
-}
 
 function fitAnsiLine(str, width) {
   if (width <= 0) return '';
