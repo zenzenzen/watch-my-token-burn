@@ -40,6 +40,21 @@ const weeklyData = {
   ],
 };
 
+const codexWeeklyData = {
+  totalTokens: 12000,
+  sessionCount: 3,
+  estimatedCost: 0.08,
+  daily: [
+    { label: 'Sat', tokens: 0, isToday: false },
+    { label: 'Sun', tokens: 0, isToday: false },
+    { label: 'Mon', tokens: 2000, isToday: false },
+    { label: 'Tue', tokens: 4000, isToday: false },
+    { label: 'Wed', tokens: 3000, isToday: false },
+    { label: 'Thu', tokens: 0, isToday: false },
+    { label: 'Fri', tokens: 3000, isToday: true },
+  ],
+};
+
 test('renderDashboard smoke tests all four screens', () => {
   const claudeCompact = renderDashboard({
     provider: 'claude',
@@ -71,6 +86,7 @@ test('renderDashboard smoke tests all four screens', () => {
     claudeSessions,
     claudeWeeklyData: weeklyData,
     codexData,
+    codexWeeklyData,
     cols: 100,
   });
 
@@ -80,6 +96,7 @@ test('renderDashboard smoke tests all four screens', () => {
   assert.match(stripAnsi(codexCompact), /Matching tg thread/);
   assert.match(stripAnsi(codexDetail), /PRIMARY LIMIT/);
   assert.match(stripAnsi(codexDetail), /RECENT THREADS/);
+  assert.match(stripAnsi(codexDetail), /WEEKLY SUMMARY/);
 });
 
 test('renderDashboard keeps lines within the requested width', () => {
@@ -121,6 +138,44 @@ test('renderDashboard keeps lines within the requested width', () => {
   for (const output of outputs) {
     assert.ok(maxVisibleWidth(output) <= 49, `output exceeded width:\n${stripAnsi(output)}`);
   }
+});
+
+test('renderDashboard shows budget remaining when budget is set', () => {
+  const claudeDetail = renderDashboard({
+    provider: 'claude',
+    viewMode: 'detail',
+    claudeSessions,
+    claudeWeeklyData: weeklyData,
+    codexData,
+    cols: 100,
+    budget: 50,
+  });
+  const codexDetail = renderDashboard({
+    provider: 'codex',
+    viewMode: 'detail',
+    claudeSessions,
+    claudeWeeklyData: weeklyData,
+    codexData,
+    cols: 100,
+    budget: 50,
+  });
+
+  assert.match(stripAnsi(claudeDetail), /BUDGET/);
+  assert.match(stripAnsi(claudeDetail), /\$50\.00/);
+  assert.match(stripAnsi(codexDetail), /BUDGET/);
+});
+
+test('renderDashboard codex detail shows fallback when no weekly data provided', () => {
+  const output = renderDashboard({
+    provider: 'codex',
+    viewMode: 'detail',
+    claudeSessions,
+    codexData,
+    cols: 100,
+  });
+
+  assert.match(stripAnsi(output), /WEEKLY SUMMARY/);
+  assert.match(stripAnsi(output), /No weekly data available yet/);
 });
 
 test('renderDashboard ASCII mode avoids Unicode powerline glyphs', () => {

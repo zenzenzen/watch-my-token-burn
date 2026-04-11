@@ -1,6 +1,24 @@
 import { MODEL_PRICING, CODEX_PRICING } from './pricing.js';
 import { formatModelName, basenameLabel, stripAnsi, primaryClaudeSession } from './format.js';
 
+// =============================================================================
+// RENDERING ARCHITECTURE
+// =============================================================================
+// This module owns the fullscreen TUI renderer. It consumes two distinct data
+// shapes that must NOT be unified:
+//
+//   Fullscreen path  — receives raw collector structs (ClaudeSession[] from
+//     collector.js and CodexData from codex.js). These are richer than the
+//     snapshot schema and drive the detail views.
+//
+//   Inline/hook path — operates on the versioned snapshot schema (snapshot.js)
+//     and is handled entirely by inline.js. The snapshot schema is a transport
+//     contract for Claude Code statusLine hooks and Codex adapters.
+//
+// Merging these two paths would require adding ~22 snapshot fields that the
+// inline renderer never uses, creating a leaky abstraction. Keep them separate.
+// =============================================================================
+
 const ESC = '\x1b[';
 
 function fgRgb(r, g, b) {
@@ -398,6 +416,7 @@ function renderClaudeSummaryStrip(sessions, ascii) {
   ], ascii);
 }
 
+// Consumes ClaudeSession[] from collector.js — NOT the snapshot schema. See RENDERING ARCHITECTURE above.
 function renderClaudeDetail(sessions, weeklyData, width, screenWidth, now, ascii, budget = 0) {
   const barWidth = Math.max(30, width - 22);
   const lines = [];
@@ -552,6 +571,7 @@ function renderCodexSummaryStrip(active, ascii) {
   ], ascii);
 }
 
+// Consumes CodexData from codex.js — NOT the snapshot schema. See RENDERING ARCHITECTURE above.
 function renderCodexDetail(codexData, width, screenWidth, now, ascii, budget = 0, codexWeeklyData = null) {
   const lines = [];
   const active = codexData?.activeSession || null;

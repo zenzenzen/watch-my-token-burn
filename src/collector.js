@@ -136,6 +136,42 @@ function computeSessionTotals(usages) {
   };
 }
 
+/**
+ * @typedef {Object} SessionTotals
+ * @property {number} totalInput
+ * @property {number} totalOutput
+ * @property {number} totalCacheRead
+ * @property {number} totalCacheCreate
+ * @property {number} totalTokens
+ * @property {number} latestInput
+ * @property {number} latestOutput
+ * @property {number} latestTotal
+ * @property {number} messageCount
+ */
+
+/**
+ * @typedef {Object} SessionContext
+ * @property {number} active   - Fresh input tokens in the latest turn
+ * @property {number} loaded   - Cache-read tokens (warm cache)
+ * @property {number} stale    - Cache-creation tokens (cold write)
+ * @property {number} total    - Sum of active + loaded + stale
+ */
+
+/**
+ * @typedef {Object} ClaudeSession
+ * @property {string} sessionId
+ * @property {string} shortId
+ * @property {number} pid
+ * @property {boolean} alive
+ * @property {string} cwd
+ * @property {string} projectName
+ * @property {number|undefined} startedAt
+ * @property {string} kind
+ * @property {string} model
+ * @property {SessionContext} context
+ * @property {SessionTotals} totals
+ */
+
 export function collectSessions(opts = {}) {
   const { sessionsDir, projectsDir } = resolveClaudePaths(opts);
   const sessions = [];
