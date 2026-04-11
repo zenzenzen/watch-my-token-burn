@@ -196,6 +196,46 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
   };
 }
 
+/**
+ * @typedef {{ usedPercent: number|null, resetsAt: number|null }} NormalizedRateLimit
+ */
+
+/**
+ * @typedef {Object} CodexSession
+ * @property {string} id
+ * @property {string} threadName
+ * @property {string} cwd
+ * @property {string} workspaceLabel
+ * @property {string|null} latestTimestamp
+ * @property {string} providerLabel
+ * @property {string} modelLabel
+ * @property {number} totalTokens
+ * @property {number} totalInputTokens
+ * @property {number} totalCachedInputTokens
+ * @property {number} totalOutputTokens
+ * @property {number} totalReasoningOutputTokens
+ * @property {number} lastTokens
+ * @property {number} lastInputTokens
+ * @property {number} lastCachedInputTokens
+ * @property {number} lastOutputTokens
+ * @property {number} lastReasoningOutputTokens
+ * @property {number} currentContextTokens
+ * @property {number} modelContextWindow
+ * @property {{ primary: NormalizedRateLimit|null, secondary: NormalizedRateLimit|null }|null} rateLimits
+ * @property {boolean} liveDataFound
+ * @property {string|null} filePath
+ */
+
+/**
+ * @typedef {Object} CodexData
+ * @property {CodexSession|null} activeSession
+ * @property {Array<{id: string, threadName: string, updatedAt: string|null, workspaceLabel: string, matchCwd: boolean, liveDataFound: boolean}>} recentThreads
+ * @property {string} cwd
+ * @property {number} allTotalInputTokens
+ * @property {number} allTotalOutputTokens
+ * @property {number} allTotalCachedInputTokens
+ */
+
 export function collectAllCodexSessions(opts = {}) {
   const { sessionsDir, sessionIndexPath } = resolveCodexPaths(opts);
   const indexEntries = safeJsonLines(sessionIndexPath)
