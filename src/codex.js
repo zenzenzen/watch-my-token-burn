@@ -196,6 +196,20 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
   };
 }
 
+export function collectAllCodexSessions(opts = {}) {
+  const { sessionsDir, sessionIndexPath } = resolveCodexPaths(opts);
+  const indexEntries = safeJsonLines(sessionIndexPath)
+    .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+  const filesById = buildFileMap(sessionsDir);
+
+  return indexEntries.map(entry => {
+    const filePath = filesById.get(entry.id);
+    if (!filePath) return buildFallbackRecord(entry);
+    const parsed = parseCodexSessionLog(safeReadText(filePath));
+    return buildSessionRecord(parsed, entry, filePath);
+  });
+}
+
 export function collectCodexData(opts = {}) {
   const { sessionsDir, sessionIndexPath } = resolveCodexPaths(opts);
   const cwd = opts.cwd || process.cwd();

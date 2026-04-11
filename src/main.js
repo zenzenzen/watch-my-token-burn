@@ -11,6 +11,7 @@ import {
   reduceInput,
 } from './state.js';
 import { refreshWeeklyData } from './tracker.js';
+import { refreshCodexWeeklyData } from './codex-tracker.js';
 import { renderDashboard } from './ui.js';
 import {
   collectLocalSnapshot,
@@ -88,6 +89,7 @@ class FullscreenApp {
     this.claudeSessions = [];
     this.claudeWeeklyData = null;
     this.codexData = null;
+    this.codexWeeklyData = null;
     this.running = true;
     this.refreshInterval = config.refreshInterval;
     this.autoClearMinutes = config.autoClearMinutes;
@@ -104,10 +106,12 @@ class FullscreenApp {
     this.claudeSessions = collectSessions();
     this.codexData = collectCodexData();
 
-    if (this.provider === 'claude') {
-      const weeklyRefreshEvery = Math.max(1, Math.round(30000 / this.refreshInterval));
-      if (this._weeklyCounter % weeklyRefreshEvery === 0) {
+    const weeklyRefreshEvery = Math.max(1, Math.round(30000 / this.refreshInterval));
+    if (this._weeklyCounter % weeklyRefreshEvery === 0) {
+      if (this.provider === 'claude') {
         this.claudeWeeklyData = refreshWeeklyData();
+      } else {
+        this.codexWeeklyData = refreshCodexWeeklyData();
       }
     }
     this._weeklyCounter++;
@@ -131,6 +135,7 @@ class FullscreenApp {
       claudeSessions: this.claudeSessions,
       claudeWeeklyData: this.claudeWeeklyData,
       codexData: this.codexData,
+      codexWeeklyData: this.codexWeeklyData,
       cols: process.stdout.columns,
       ascii: this.ascii,
       budget: this.budget,
@@ -375,6 +380,7 @@ async function main() {
       claudeSessions: app.claudeSessions,
       claudeWeeklyData: app.provider === 'claude' ? refreshWeeklyData() : null,
       codexData: app.codexData,
+      codexWeeklyData: app.provider === 'codex' ? refreshCodexWeeklyData() : null,
       cols: process.stdout.columns,
       ascii: app.ascii,
       budget: app.budget,
