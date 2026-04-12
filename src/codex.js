@@ -185,6 +185,34 @@ function buildFileMap(sessionsDir) {
   return filesById;
 }
 
+function sortSessionEntries(entries) {
+  return [...entries].sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
+}
+
+function buildSessionEntries(indexEntries, filesById) {
+  const knownIds = new Set(indexEntries.map(entry => entry.id));
+  const fileOnlyEntries = [];
+
+  for (const [id, filePath] of filesById) {
+    if (knownIds.has(id)) continue;
+
+    let updatedAt = null;
+    try {
+      updatedAt = statSync(filePath).mtime.toISOString();
+    } catch {
+      updatedAt = null;
+    }
+
+    fileOnlyEntries.push({
+      id,
+      thread_name: null,
+      updated_at: updatedAt,
+    });
+  }
+
+  return sortSessionEntries([...indexEntries, ...fileOnlyEntries]);
+}
+
 function buildFallbackRecord(indexEntry) {
   return {
     id: indexEntry.id,
@@ -304,9 +332,8 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
 
 export function collectAllCodexSessions(opts = {}) {
   const { sessionsDir, sessionIndexPath, configDir, useScanIndex } = resolveCodexPaths(opts);
-  const indexEntries = safeJsonLines(sessionIndexPath)
-    .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
   const filesById = buildFileMap(sessionsDir);
+  const indexEntries = buildSessionEntries(safeJsonLines(sessionIndexPath), filesById);
   const scanIndex = useScanIndex ? createScanIndex({
     name: 'codex',
     version: CODEX_SCAN_INDEX_VERSION,
@@ -332,9 +359,8 @@ export function collectAllCodexSessions(opts = {}) {
 export function collectCodexData(opts = {}) {
   const { sessionsDir, sessionIndexPath, configDir, useScanIndex } = resolveCodexPaths(opts);
   const cwd = opts.cwd || process.cwd();
-  const indexEntries = safeJsonLines(sessionIndexPath)
-    .sort((a, b) => String(b.updated_at || '').localeCompare(String(a.updated_at || '')));
   const filesById = buildFileMap(sessionsDir);
+  const indexEntries = buildSessionEntries(safeJsonLines(sessionIndexPath), filesById);
   const cache = new Map();
   const scanIndex = useScanIndex ? createScanIndex({
     name: 'codex',
