@@ -5,7 +5,8 @@
   "type": "module",
   "bin": {
     "token-gauge": "./src/main.js",
-    "tg": "./src/main.js"
+    "tg": "./src/main.js",
+    "token-gauge-mcp": "./src/mcp-main.js"
   },
   "scripts": {
     "start": "node src/main.js",
