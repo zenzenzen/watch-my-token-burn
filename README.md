@@ -21,6 +21,7 @@ It renders that data as either:
 - a fullscreen terminal dashboard
 - an inline status/footer snapshot
 - structured JSON for hooks and scripts
+- an MCP server for agent/tool queries
 
 Runtime defaults can now also come from `~/.config/token-gauge/config.json`, with CLI flags taking precedence over the config file.
 
@@ -183,6 +184,41 @@ This emits the full standalone state blob, including:
 - Claude weekly summary
 - Codex active/recent session state
 - Codex weekly summary
+
+### MCP server
+
+```sh
+token-gauge-mcp
+```
+
+This starts a stdio MCP server that reuses the standalone full-state JSON shape instead of defining a second schema.
+
+Exposed surfaces:
+
+- resource: `token-gauge://standalone-state`
+- tool: `get_standalone_state`
+
+`get_standalone_state` accepts optional overrides for:
+
+- `provider`
+- `viewMode`
+- `budget`
+- `cwd`
+- `aggregateDir`
+
+The tool returns the full standalone state in `structuredContent`, and the resource returns the same blob as `application/json`.
+
+Example MCP config:
+
+```json
+{
+  "mcpServers": {
+    "token-gauge": {
+      "command": "token-gauge-mcp"
+    }
+  }
+}
+```
 
 ### Claude Code status line
 
