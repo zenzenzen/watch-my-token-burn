@@ -1,5 +1,5 @@
 /**
- * Weekly usage tracker — persists daily token aggregates to JSON.
+ * Claude usage tracker — persists local-day token aggregates to JSON.
  * Storage: ~/.config/token-gauge/weekly.json
  */
 
@@ -8,7 +8,10 @@ import { join } from 'node:path';
 import { homedir, hostname } from 'node:os';
 import { collectSessionsInRange } from './collector.js';
 import { MODEL_PRICING } from './pricing.js';
+import { buildWindow, dayLabel, listWindowDates, startOfLocalDay, endOfLocalDay, toLocalDateKey } from './period.js';
 import { resolveTokenGaugeConfigDir } from './scan-index.js';
+
+const DAY_RETENTION = 62;
 
 function resolveTrackerPaths(opts = {}) {
   const configDir = resolveTokenGaugeConfigDir(opts.configDir);
@@ -55,7 +58,7 @@ function sumClaudeDay(target, dayData = {}) {
   target.sessions += dayData.sessions || 0;
 }
 
-function loadAggregateWeeklyData({ aggregateDir, aggregateWeeklyFile, fallbackData }) {
+function loadAggregateWeeklyData({ aggregateDir, fallbackData }) {
   if (!aggregateDir || !existsSync(aggregateDir)) {
     return { data: fallbackData, machineCount: 1 };
   }
@@ -95,56 +98,38 @@ function loadAggregateWeeklyData({ aggregateDir, aggregateWeeklyFile, fallbackDa
   return { data: merged, machineCount };
 }
 
-function dateKey(date) {
-  return date.toISOString().slice(0, 10); // YYYY-MM-DD
-}
-
-function dayLabel(date) {
-  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][date.getDay()];
-}
-
 function getClaudeEstimatedCost(model, totals) {
   const pricing = MODEL_PRICING[model] || MODEL_PRICING.default;
   return (
-    totals.totalInput * pricing.input +
-    totals.totalOutput * pricing.output +
-    totals.totalCacheRead * pricing.cacheRead +
-    totals.totalCacheCreate * pricing.cacheWrite
+    (totals.totalInput || 0) * pricing.input +
+    (totals.totalOutput || 0) * pricing.output +
+    (totals.totalCacheRead || 0) * pricing.cacheRead +
+    (totals.totalCacheCreate || 0) * pricing.cacheWrite
   ) / 1_000_000;
 }
 
-/**
- * Refresh today's data from session files and return weekly summary.
- */
-export function refreshWeeklyData(opts = {}) {
-  const { configDir, weeklyFile, claudeJsonPath, aggregateDir, aggregateWeeklyFile } = resolveTrackerPaths(opts);
-  const data = loadWeeklyFile(weeklyFile);
-  const now = opts.now ? new Date(opts.now) : new Date();
-  const todayKey = dateKey(now);
+function refreshTodayEntry(data, now, opts = {}) {
+  const todayKey = toLocalDateKey(now);
+  const todayStart = startOfLocalDay(now);
+  const todayEnd = endOfLocalDay(now);
 
-  // Compute today's range
-  const todayStart = new Date(now);
-  todayStart.setHours(0, 0, 0, 0);
-  const todayEnd = new Date(now);
-  todayEnd.setHours(23, 59, 59, 999);
-
-  // Refresh today's data from session files
   const todaySessions = (opts.collectSessionsInRangeFn || collectSessionsInRange)(
     todayStart.getTime(),
     todayEnd.getTime(),
     opts.collectorOpts || {},
   );
+
   let todayTokens = 0;
   let todaySessionCount = 0;
   const seenSessions = new Set();
   let todayEstimatedCost = 0;
 
-  for (const s of todaySessions) {
-    todayTokens += s.totals.totalTokens;
-    todayEstimatedCost += getClaudeEstimatedCost(s.model, s.totals);
-    if (!seenSessions.has(s.sessionId)) {
+  for (const session of todaySessions) {
+    todayTokens += session.totals.totalTokens || 0;
+    todayEstimatedCost += getClaudeEstimatedCost(session.model, session.totals);
+    if (!seenSessions.has(session.sessionId)) {
+      seenSessions.add(session.sessionId);
       todaySessionCount++;
-      seenSessions.add(s.sessionId);
     }
   }
 
@@ -155,15 +140,40 @@ export function refreshWeeklyData(opts = {}) {
     updated: now.toISOString(),
   };
 
-  // Prune entries older than 7 days
-  const weekAgo = new Date(now);
-  weekAgo.setDate(weekAgo.getDate() - 7);
-  const weekAgoKey = dateKey(weekAgo);
-
+  const oldest = startOfLocalDay(now);
+  oldest.setDate(oldest.getDate() - (DAY_RETENTION - 1));
+  const oldestKey = toLocalDateKey(oldest);
   for (const key of Object.keys(data.days)) {
-    if (key < weekAgoKey) delete data.days[key];
+    if (key < oldestKey) delete data.days[key];
+  }
+}
+
+function loadBilledCost(claudeJsonPath, machineCount) {
+  if (machineCount > 1) return null;
+
+  let billedCost = 0;
+  let billedCostAvailable = false;
+  try {
+    const claudeJson = JSON.parse(readFileSync(claudeJsonPath, 'utf8'));
+    for (const project of Object.values(claudeJson.projects || {})) {
+      if (!project?.lastCost) continue;
+      billedCost += project.lastCost;
+      billedCostAvailable = true;
+    }
+  } catch {
+    return null;
   }
 
+  return billedCostAvailable ? billedCost : null;
+}
+
+export function summarizeWindow(opts = {}) {
+  const period = opts.period || '7d';
+  const { configDir, weeklyFile, claudeJsonPath, aggregateDir, aggregateWeeklyFile } = resolveTrackerPaths(opts);
+  const data = loadWeeklyFile(weeklyFile);
+  const now = opts.now ? new Date(opts.now) : new Date();
+
+  refreshTodayEntry(data, now, opts);
   saveWeeklyFile(data, configDir, weeklyFile, now);
   if (aggregateDir && aggregateWeeklyFile) {
     saveWeeklyFile(data, aggregateDir, aggregateWeeklyFile, now);
@@ -171,59 +181,46 @@ export function refreshWeeklyData(opts = {}) {
 
   const aggregate = loadAggregateWeeklyData({
     aggregateDir,
-    aggregateWeeklyFile,
     fallbackData: data,
   });
   const summaryData = aggregate.data;
+  const { window, dates } = listWindowDates(period, now);
+  const todayKey = toLocalDateKey(now);
 
-  // Build summary for the last 7 days
   const daily = [];
   let totalTokens = 0;
   let totalSessions = 0;
   let estimatedCost = 0;
 
-  for (let i = 6; i >= 0; i--) {
-    const d = new Date(now);
-    d.setDate(d.getDate() - i);
-    const key = dateKey(d);
+  for (const date of dates) {
+    const key = toLocalDateKey(date);
     const dayData = summaryData.days[key] || { tokens: 0, estimatedCost: 0, sessions: 0 };
-    const isToday = key === todayKey;
-
     daily.push({
       date: key,
-      label: dayLabel(d),
-      tokens: dayData.tokens,
+      label: dayLabel(date),
+      tokens: dayData.tokens || 0,
       estimatedCost: dayData.estimatedCost || 0,
-      sessions: dayData.sessions,
-      isToday,
+      sessions: dayData.sessions || 0,
+      isToday: key === todayKey,
     });
 
-    totalTokens += dayData.tokens;
-    totalSessions += dayData.sessions;
+    totalTokens += dayData.tokens || 0;
+    totalSessions += dayData.sessions || 0;
     estimatedCost += dayData.estimatedCost || 0;
   }
 
-  // Pull billed costs from .claude.json when available
-  let billedCost = 0;
-  let billedCostAvailable = false;
-  if (aggregate.machineCount <= 1) {
-    try {
-      const claudeJson = JSON.parse(readFileSync(claudeJsonPath, 'utf8'));
-      for (const proj of Object.values(claudeJson.projects || {})) {
-        if (proj.lastCost) {
-          billedCost += proj.lastCost;
-          billedCostAvailable = true;
-        }
-      }
-    } catch { /* billed cost is optional */ }
-  }
-
   return {
+    period: window.period,
+    window: window.window,
     daily,
     totalTokens,
     sessionCount: totalSessions,
     estimatedCost,
     machineCount: aggregate.machineCount,
-    billedCost: billedCostAvailable ? billedCost : null,
+    billedCost: loadBilledCost(claudeJsonPath, aggregate.machineCount),
   };
+}
+
+export function refreshWeeklyData(opts = {}) {
+  return summarizeWindow({ ...opts, period: '7d' });
 }

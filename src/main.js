@@ -4,14 +4,17 @@
  * token-gauge — Terminal usage views for local dashboards and footer hooks.
  */
 
-import { collectProjectMetrics, collectSessions } from './collector.js';
-import { collectCodexData } from './codex.js';
+import { collectProjectMetrics, collectSessions, collectSessionsInRange } from './collector.js';
+import { buildAnalytics } from './analytics.js';
+import { collectAllCodexSessions, collectCodexData } from './codex.js';
+import { buildWindow } from './period.js';
 import {
   parseCliArgs,
   reduceInput,
+  saveAnalyticsVisibilityConfig,
 } from './state.js';
-import { refreshWeeklyData } from './tracker.js';
-import { refreshCodexWeeklyData } from './codex-tracker.js';
+import { summarizeWindow as summarizeClaudeWindow } from './tracker.js';
+import { summarizeWindow as summarizeCodexWindow } from './codex-tracker.js';
 import { renderDashboard } from './ui.js';
 import { collectStandaloneState } from './full-state.js';
 import { loadClaudeRateLimitCache, saveClaudeRateLimitCache } from './claude-rate-limits.js';
@@ -64,6 +67,7 @@ Standalone fullscreen options:
   -i, --interval <ms>    Refresh interval in ms (default: 15000)
   --autoclear <min>      Auto-clear stale Claude sessions after N minutes (default: 30)
   --view <mode>          compact | detail (default: compact)
+  --period <window>      today | 7d | 30d | month (default: 7d)
   --budget <amount>      Set a cash budget in USD to show remaining spend (e.g. --budget 50)
 
 Examples:
@@ -85,7 +89,12 @@ Fullscreen controls:
   q / Ctrl+C            Quit
   r / Space             Force refresh
   v                     Toggle compact/detail
+  1 / 2 / 3 / 4         Switch period: today / 7d / 30d / month
   [ / ]                 Switch provider tabs
+  , / .                 Cycle detail sub-tabs
+  s                     Open detail settings
+  a g t m b d p         Toggle Activity / Scoring / Tools / MCP / Bash / Advisor / Period Summary
+  e                     Re-enable all analytics panels for the current provider
   c                     Clear stale Claude sessions (Claude detail only)
 `);
 }
@@ -94,38 +103,50 @@ class FullscreenApp {
   constructor(config) {
     this.claudeSessions = [];
     this.claudeProjectMetrics = [];
-    this.claudeWeeklyData = null;
+    this.claudeSummary = null;
+    this.claudeAnalytics = null;
     this.claudeRateLimits = null;
     this.codexData = null;
-    this.codexWeeklyData = null;
+    this.codexSummary = null;
+    this.codexAnalytics = null;
     this.running = true;
     this.refreshInterval = config.refreshInterval;
     this.autoClearMinutes = config.autoClearMinutes;
     this.aggregateDir = config.aggregateDir || null;
     this.provider = config.provider;
     this.viewMode = config.viewMode;
+    this.period = config.period;
+    this.detailTab = config.detailTab;
+    this.analyticsVisibility = config.analyticsVisibility;
+    this.configFilePath = config.configFilePath;
     this.ascii = config.ascii;
     this.budget = config.budget || 0;
     this.isInteractive = Boolean(process.stdout.isTTY && process.stdin.isTTY);
     this._teardownDone = false;
-    this._weeklyCounter = 0;
   }
 
   collectData() {
+    const now = new Date().toISOString();
+    const analyticsWindow = buildWindow(this.period, now);
     this.claudeSessions = collectSessions();
     this.claudeProjectMetrics = collectProjectMetrics();
     this.claudeRateLimits = loadClaudeRateLimitCache();
     this.codexData = collectCodexData();
-
-    const weeklyRefreshEvery = Math.max(1, Math.round(30000 / this.refreshInterval));
-    if (this._weeklyCounter % weeklyRefreshEvery === 0) {
-      if (this.provider === 'claude') {
-        this.claudeWeeklyData = refreshWeeklyData({ aggregateDir: this.aggregateDir });
-      } else {
-        this.codexWeeklyData = refreshCodexWeeklyData({ aggregateDir: this.aggregateDir });
-      }
-    }
-    this._weeklyCounter++;
+    this.claudeSummary = summarizeClaudeWindow({
+      aggregateDir: this.aggregateDir,
+      period: this.period,
+      now,
+    });
+    this.codexSummary = summarizeCodexWindow({
+      aggregateDir: this.aggregateDir,
+      period: this.period,
+      now,
+    });
+    this.claudeAnalytics = buildAnalytics(
+      collectSessionsInRange(analyticsWindow.startMs, analyticsWindow.endMs),
+      analyticsWindow,
+    );
+    this.codexAnalytics = buildAnalytics(collectAllCodexSessions(), analyticsWindow);
   }
 
   autoClear() {
@@ -143,12 +164,17 @@ class FullscreenApp {
     const output = renderDashboard({
       provider: this.provider,
       viewMode: this.viewMode,
+      period: this.period,
+      detailTab: this.detailTab,
+      analyticsVisibility: this.analyticsVisibility,
       claudeSessions: this.claudeSessions,
-      claudeWeeklyData: this.claudeWeeklyData,
+      claudeSummary: this.claudeSummary,
+      claudeAnalytics: this.claudeAnalytics,
       claudeProjectMetrics: this.claudeProjectMetrics,
       claudeRateLimits: this.claudeRateLimits,
       codexData: this.codexData,
-      codexWeeklyData: this.codexWeeklyData,
+      codexSummary: this.codexSummary,
+      codexAnalytics: this.codexAnalytics,
       cols: process.stdout.columns,
       ascii: this.ascii,
       budget: this.budget,
@@ -177,9 +203,29 @@ class FullscreenApp {
     process.stdin.setEncoding('utf8');
 
     process.stdin.on('data', key => {
-      const input = reduceInput({ provider: this.provider, viewMode: this.viewMode }, key);
+      const previousAnalyticsVisibility = JSON.stringify(this.analyticsVisibility);
+      const input = reduceInput({
+        provider: this.provider,
+        viewMode: this.viewMode,
+        period: this.period,
+        detailTab: this.detailTab,
+        analyticsVisibility: this.analyticsVisibility,
+      }, key);
       this.provider = input.state.provider;
       this.viewMode = input.state.viewMode;
+      this.period = input.state.period;
+      this.detailTab = input.state.detailTab;
+      this.analyticsVisibility = input.state.analyticsVisibility;
+
+      if (previousAnalyticsVisibility !== JSON.stringify(this.analyticsVisibility)) {
+        try {
+          saveAnalyticsVisibilityConfig(this.analyticsVisibility, {
+            configFilePath: this.configFilePath,
+          });
+        } catch (error) {
+          process.stderr.write(`token-gauge: failed to persist analytics settings: ${error.message}\n`);
+        }
+      }
 
       switch (input.action) {
         case 'quit':
@@ -188,8 +234,10 @@ class FullscreenApp {
         case 'clear':
           this.clearClaudeSessions();
           break;
+        case 'redraw':
+          this.draw();
+          break;
         case 'refresh':
-          this._weeklyCounter = 0;
           this.refresh();
           break;
         default:
@@ -399,15 +447,24 @@ async function main() {
 
     app.collectData();
     app.autoClear();
+    const window = buildWindow(config.period);
     process.stdout.write(renderDashboard({
       provider: app.provider,
       viewMode: app.viewMode,
+      period: app.period,
+      detailTab: app.detailTab,
+      analyticsVisibility: app.analyticsVisibility,
       claudeSessions: app.claudeSessions,
       claudeProjectMetrics: app.claudeProjectMetrics,
       claudeRateLimits: app.claudeRateLimits,
       codexData: app.codexData,
-      claudeWeeklyData: app.provider === 'claude' ? refreshWeeklyData({ aggregateDir: config.aggregateDir }) : null,
-      codexWeeklyData: app.provider === 'codex' ? refreshCodexWeeklyData({ aggregateDir: config.aggregateDir }) : null,
+      claudeSummary: summarizeClaudeWindow({ aggregateDir: config.aggregateDir, period: config.period }),
+      claudeAnalytics: buildAnalytics(
+        collectSessionsInRange(window.startMs, window.endMs),
+        window,
+      ),
+      codexSummary: summarizeCodexWindow({ aggregateDir: config.aggregateDir, period: config.period }),
+      codexAnalytics: buildAnalytics(collectAllCodexSessions(), window),
       cols: process.stdout.columns,
       ascii: app.ascii,
       budget: app.budget,

@@ -1,5 +1,6 @@
 import { MODEL_PRICING, CODEX_PRICING } from './pricing.js';
 import { calculateCacheHitRate, formatModelName, basenameLabel, stripAnsi, primaryClaudeSession } from './format.js';
+import { ensureDetailTab, getDetailTabsForProvider, normalizeAnalyticsVisibility } from './state.js';
 
 // =============================================================================
 // RENDERING ARCHITECTURE
@@ -92,6 +93,16 @@ const MODEL_CONTEXT_LIMITS = {
   'claude-sonnet-4-6': 200_000,
   'claude-haiku-4-5-20251001': 200_000,
   default: 200_000,
+};
+
+const DETAIL_TAB_LABELS = {
+  overview: 'OVERVIEW',
+  activity: 'ACTIVITY',
+  scoring: 'SCORING',
+  breakdown: 'BREAKDOWN',
+  advisor: 'ADVISOR',
+  summary: 'SUMMARY',
+  settings: 'SETTINGS',
 };
 
 
@@ -279,7 +290,12 @@ function renderAdvisorPanel(lines, messages, width, ascii = false) {
   }
 }
 
-function buildClaudeAdvisorMessages(sessions, weeklyData, budget, nowMs) {
+function formatRate(value) {
+  if (value === null || value === undefined || Number.isNaN(value)) return '--';
+  return `${Math.round(value * 100)}%`;
+}
+
+function buildClaudeAdvisorMessages(sessions, summary, analytics, budget, nowMs) {
   if (!sessions.length) return [];
 
   const messages = [];
@@ -314,14 +330,23 @@ function buildClaudeAdvisorMessages(sessions, weeklyData, budget, nowMs) {
     messages.push(`${primary.projectName} is averaging ${formatCost(burn.costPerHour)}/hr in the current burn window.`);
   }
 
-  if (budget > 0 && (weeklyData?.estimatedCost || 0) >= budget * 0.8) {
-    messages.push(`Estimated weekly spend is already ${formatCost(weeklyData.estimatedCost)} against a ${formatCost(budget)} budget.`);
+  if (budget > 0 && (summary?.estimatedCost || 0) >= budget * 0.8) {
+    messages.push(`Estimated spend is already ${formatCost(summary.estimatedCost)} against a ${formatCost(budget)} budget for this period.`);
+  }
+
+  const lowShot = analytics?.categoryBreakdown?.find(row =>
+    (row.category === 'coding' || row.category === 'debugging')
+    && row.oneShotRate !== null
+    && row.oneShotRate < 0.5
+  );
+  if (lowShot) {
+    messages.push(`${lowShot.category} one-shot rate is only ${formatRate(lowShot.oneShotRate)}. Token burn looks stuck in retry loops instead of landing on the first edit.`);
   }
 
   return messages;
 }
 
-function buildCodexAdvisorMessages(codexData, budget, nowMs) {
+function buildCodexAdvisorMessages(codexData, summary, analytics, budget, nowMs) {
   const active = codexData?.activeSession;
   if (!active) return [];
 
@@ -357,11 +382,17 @@ function buildCodexAdvisorMessages(codexData, budget, nowMs) {
     messages.push(`This Codex session is averaging ${formatCost(burn.costPerHour)}/hr over the current timeline window.`);
   }
 
-  if (budget > 0) {
-    const totalSpend = getCodexTotalCost(codexData);
-    if (totalSpend >= budget * 0.8) {
-      messages.push(`Estimated Codex spend is ${formatCost(totalSpend)} against a ${formatCost(budget)} budget.`);
-    }
+  if (budget > 0 && (summary?.estimatedCost || getCodexTotalCost(codexData)) >= budget * 0.8) {
+    messages.push(`Estimated Codex spend is ${formatCost(summary?.estimatedCost || getCodexTotalCost(codexData))} against a ${formatCost(budget)} budget for this period.`);
+  }
+
+  const lowShot = analytics?.categoryBreakdown?.find(row =>
+    (row.category === 'coding' || row.category === 'debugging')
+    && row.oneShotRate !== null
+    && row.oneShotRate < 0.5
+  );
+  if (lowShot) {
+    messages.push(`${lowShot.category} one-shot rate is only ${formatRate(lowShot.oneShotRate)} on this window. You’re spending tokens cycling through retry turns.`);
   }
 
   return messages;
@@ -542,23 +573,65 @@ function renderTabs(provider) {
   }).join(' ');
 }
 
-function renderHeader({ provider, viewMode, width, now }) {
+function renderHeader({ provider, viewMode, period, width, now }) {
   const title = `${C.bold}${C.cyan}  TOKEN GAUGE${C.reset}`;
   const tabs = renderTabs(provider);
-  const mode = `${bgHex(THEME.panelAlt)}${fgHex(THEME.text)} ${viewMode.toUpperCase()} ${C.reset}`;
+  const mode = `${bgHex(THEME.panelAlt)}${fgHex(THEME.text)} ${viewMode.toUpperCase()} ${String(period || '7d').toUpperCase()} ${C.reset}`;
   const right = `${tabs} ${mode}  ${C.dim}${formatTime(now)}${C.reset}`;
   const pad = Math.max(1, width - stripAnsi(title).length - stripAnsi(right).length);
   return title + ' '.repeat(pad) + right;
 }
 
 function renderFooter(width, provider, viewMode) {
-  const parts = ['q:quit', 'r:refresh', 'v:view', '[:prev', ']:next'];
-  if (provider === 'claude' && viewMode === 'detail') parts.push('c:clear stale');
+  const parts = ['q:quit', 'r:fresh', 'v:mode', '1-4:period', '[/]:provider'];
+  if (viewMode === 'detail') parts.push(',/.:subtab', 's:settings');
+  if (provider === 'claude' && viewMode === 'detail') parts.push('c:clear');
   return `  ${C.dim}${parts.join('  ')}${C.reset}`;
 }
 
 function renderCompactFooter(width) {
-  return `  ${C.dim}q:quit  r:refresh  v:view  [:prev  ]:next${C.reset}`;
+  return `  ${C.dim}q:quit  r:fresh  v:mode  1-4:period  [/]:provider${C.reset}`;
+}
+
+function renderDetailTabs(provider, detailTab, analyticsVisibility) {
+  const activeTab = ensureDetailTab(detailTab, provider, analyticsVisibility);
+  const tabs = getDetailTabsForProvider(provider, analyticsVisibility);
+
+  return tabs.map(tab => {
+    const active = tab === activeTab;
+    const bg = active ? (provider === 'claude' ? THEME.bubblegum : THEME.ocean) : THEME.quiet;
+    const fg = active ? THEME.text : THEME.muted;
+    return `${bgHex(bg)}${fgHex(fg)} ${DETAIL_TAB_LABELS[tab] || tab.toUpperCase()} ${C.reset}`;
+  }).join(' ');
+}
+
+function renderSettingsPanel(lines, provider, analyticsVisibility, width) {
+  const visibility = normalizeAnalyticsVisibility(analyticsVisibility)[provider] || {};
+  const rows = [
+    ['a', 'Activity', 'Turns, categories, and one-shot rates', visibility.activity],
+    ['g', 'Scoring', 'Per-chat context and token efficiency', visibility.scoring],
+    ['t', 'Tools', 'Tool breakdown panel inside Breakdown', visibility.tools],
+    ['m', 'MCP', 'MCP server breakdown panel inside Breakdown', visibility.mcp],
+    ['b', 'Bash', 'Shell command breakdown panel inside Breakdown', visibility.bash],
+    ['d', 'Advisor', 'Efficiency advisor recommendations', visibility.advisor],
+    ['p', 'Summary', 'Period summary and history chart', visibility.summary],
+  ];
+
+  lines.push('');
+  lines.push(`  ${horizontalLine(width - 2)}`);
+  lines.push(`  ${C.bold}${C.cyan}${provider.toUpperCase()} SETTINGS${C.reset}`);
+  lines.push(`  ${C.dim}Disable panels you do not want in the detail tab carousel. Changes save to config immediately.${C.reset}`);
+
+  for (const [key, label, description, enabled] of rows) {
+    const state = enabled
+      ? `${C.green}${C.bold}ON ${C.reset}`
+      : `${C.dim}off${C.reset}`;
+    lines.push(`  ${C.bold}${key}${C.reset}  ${label.padEnd(9)} ${state} ${C.dim}${description}${C.reset}`);
+  }
+
+  const enabledCount = rows.filter(([, , , enabled]) => enabled).length;
+  lines.push('');
+  lines.push(`  ${C.dim}${enabledCount}/${rows.length} analytics panels enabled. Use${C.reset} ${C.bold}e${C.reset} ${C.dim}to restore all defaults for ${provider}.${C.reset}`);
 }
 
 function compactClaudeSegments(sessions, ascii, budget = 0, weeklyData = null) {
@@ -614,14 +687,14 @@ function compactCodexSegments(codexData, ascii, budget = 0) {
   return segments;
 }
 
-function renderCompact(provider, sessions, codexData, width, screenWidth, now, ascii, budget = 0, weeklyData = null) {
+function renderCompact(provider, sessions, codexData, width, screenWidth, now, ascii, budget = 0, summary = null, period = '7d') {
   const lines = [];
   lines.push('');
-  lines.push(renderHeader({ provider, viewMode: 'compact', width, now }));
+  lines.push(renderHeader({ provider, viewMode: 'compact', period, width, now }));
   lines.push('');
 
   if (provider === 'claude') {
-    const segments = compactClaudeSegments(sessions, ascii, budget, weeklyData);
+    const segments = compactClaudeSegments(sessions, ascii, budget, summary);
     if (segments.length === 0) {
       lines.push(`  ${C.dim}No Claude sessions detected.${C.reset}`);
     } else {
@@ -664,13 +737,15 @@ function renderClaudeSummaryStrip(sessions, ascii) {
 }
 
 // Consumes ClaudeSession[] from collector.js — NOT the snapshot schema. See RENDERING ARCHITECTURE above.
-function renderClaudeDetail(sessions, weeklyData, projectMetrics, rateLimitCache, width, screenWidth, now, ascii, budget = 0) {
+function renderClaudeDetail(sessions, summary, analytics, projectMetrics, rateLimitCache, width, screenWidth, now, ascii, budget = 0, period = '7d', detailTab = 'overview', analyticsVisibility = null) {
   const barWidth = Math.max(30, width - 22);
   const lines = [];
   const g = glyphs(ascii);
+  const activeTab = ensureDetailTab(detailTab, 'claude', analyticsVisibility);
+  const visibility = normalizeAnalyticsVisibility(analyticsVisibility).claude;
 
   lines.push('');
-  lines.push(renderHeader({ provider: 'claude', viewMode: 'detail', width, now }));
+  lines.push(renderHeader({ provider: 'claude', viewMode: 'detail', period, width, now }));
 
   if (sessions.length > 0) {
     lines.push('');
@@ -679,144 +754,142 @@ function renderClaudeDetail(sessions, weeklyData, projectMetrics, rateLimitCache
 
   lines.push('');
   lines.push(`  ${horizontalLine(width - 2, g.line)}`);
+  lines.push(`  ${renderDetailTabs('claude', activeTab, analyticsVisibility)}`);
+  lines.push('');
+  lines.push(`  ${horizontalLine(width - 2, g.line)}`);
 
-  if (rateLimitCache?.primary || rateLimitCache?.secondary) {
-    renderRateLimitPanel(lines, 'PRIMARY LIMIT', rateLimitCache?.primary, width, C.bgYellow, now.getTime());
-    renderRateLimitPanel(lines, 'SECONDARY LIMIT', rateLimitCache?.secondary, width, C.bgPurple, now.getTime());
-    if (rateLimitCache?.updatedAt) {
-      lines.push(`  ${C.dim}Claude rate limits cached from hook data at ${rateLimitCache.updatedAt}${C.reset}`);
+  if (activeTab === 'overview') {
+    if (rateLimitCache?.primary || rateLimitCache?.secondary) {
+      renderRateLimitPanel(lines, 'PRIMARY LIMIT', rateLimitCache?.primary, width, C.bgYellow, now.getTime());
+      renderRateLimitPanel(lines, 'SECONDARY LIMIT', rateLimitCache?.secondary, width, C.bgPurple, now.getTime());
+      if (rateLimitCache?.updatedAt) {
+        lines.push(`  ${C.dim}Claude rate limits cached from hook data at ${rateLimitCache.updatedAt}${C.reset}`);
+      }
+      lines.push('');
+      lines.push(`  ${horizontalLine(width - 2, g.line)}`);
     }
-    lines.push('');
-    lines.push(`  ${horizontalLine(width - 2, g.line)}`);
-  }
 
-  if (sessions.length === 0) {
-    lines.push('');
-    lines.push(`  ${C.dim}No Claude sessions detected.${C.reset}`);
-    lines.push(`  ${C.dim}Start a Claude Code session to see token usage.${C.reset}`);
-  }
+    if (sessions.length === 0) {
+      lines.push('');
+      lines.push(`  ${C.dim}No Claude sessions detected.${C.reset}`);
+      lines.push(`  ${C.dim}Start a Claude Code session to see token usage.${C.reset}`);
+    }
 
-  if (sessions.length > 1) {
-    const activeSessions = sessions.filter(session => session.alive);
-    const totalTokens = sessions.reduce((sum, session) => sum + session.totals.totalTokens, 0);
-    const totalContext = sessions.reduce((sum, session) => sum + (session.alive ? session.context.total : 0), 0);
-    lines.push('');
-    lines.push(`  ${C.bold}${sessions.length} sessions${C.reset} ${C.dim}(${activeSessions.length} active)${C.reset}  ${C.dim}total tokens:${C.reset} ${C.bold}${formatTokens(totalTokens)}${C.reset}  ${C.dim}active context:${C.reset} ${C.bold}${formatTokens(totalContext)}${C.reset}`);
-  }
+    if (sessions.length > 1) {
+      const activeSessions = sessions.filter(session => session.alive);
+      const totalTokens = sessions.reduce((sum, session) => sum + session.totals.totalTokens, 0);
+      const totalContext = sessions.reduce((sum, session) => sum + (session.alive ? session.context.total : 0), 0);
+      lines.push('');
+      lines.push(`  ${C.bold}${sessions.length} sessions${C.reset} ${C.dim}(${activeSessions.length} active)${C.reset}  ${C.dim}total tokens:${C.reset} ${C.bold}${formatTokens(totalTokens)}${C.reset}  ${C.dim}active context:${C.reset} ${C.bold}${formatTokens(totalContext)}${C.reset}`);
+    }
 
-  for (const session of sessions) {
-    const status = session.alive
-      ? `${C.green}${C.bold}${g.active} ACTIVE${C.reset}`
-      : `${C.grey}${g.inactive} ended${C.reset}`;
-    const age = session.startedAt
-      ? `${C.dim}${formatDuration(Date.now() - session.startedAt)} ago${C.reset}`
-      : '';
-    const contextLimit = getContextLimit(session.model);
+    for (const session of sessions) {
+      const status = session.alive
+        ? `${C.green}${C.bold}${g.active} ACTIVE${C.reset}`
+        : `${C.grey}${g.inactive} ended${C.reset}`;
+      const age = session.startedAt
+        ? `${C.dim}${formatDuration(Date.now() - session.startedAt)} ago${C.reset}`
+        : '';
+      const contextLimit = getContextLimit(session.model);
 
       lines.push('');
       lines.push(`  ${C.bold}${session.projectName}${C.reset} ${C.dim}(${session.shortId})${C.reset}  ${status}  ${C.dim}PID ${session.pid}${C.reset}  ${age}`);
 
       if (session.model !== 'unknown') {
-      lines.push(`  ${renderPowerline([
-        { text: formatModelName(session.model), bg: THEME.panelAlt, fg: THEME.text },
-        { text: `${session.totals.messageCount} msgs`, bg: THEME.quiet, fg: THEME.muted },
-        { text: session.alive ? 'ACTIVE' : 'ENDED', bg: session.alive ? THEME.emerald : THEME.panelSoft, fg: session.alive ? THEME.ink : THEME.text },
-      ], ascii)}`);
+        lines.push(`  ${renderPowerline([
+          { text: formatModelName(session.model), bg: THEME.panelAlt, fg: THEME.text },
+          { text: `${session.totals.messageCount} msgs`, bg: THEME.quiet, fg: THEME.muted },
+          { text: session.alive ? 'ACTIVE' : 'ENDED', bg: session.alive ? THEME.emerald : THEME.panelSoft, fg: session.alive ? THEME.ink : THEME.text },
+        ], ascii)}`);
+      }
+
+      if (session.context.total > 0) {
+        const remaining = Math.max(0, contextLimit - session.context.total);
+        const contextBar = solidBar([
+          { value: session.context.stale, bg: C.bgGrey },
+          { value: session.context.loaded, bg: C.bgYellow },
+          { value: session.context.active, bg: C.bgGreen },
+          { value: remaining, bg: C.bgDark },
+        ], contextLimit, barWidth);
+
+        lines.push('');
+        const ctxPct = formatPercent((session.context.total / contextLimit) * 100);
+        lines.push(`  ${C.dim}CONTEXT WINDOW${C.reset}  ${C.bold}${ctxPct}${C.reset} ${C.dim}of ${formatTokens(contextLimit)}${C.reset}  ${C.dim}(${formatTokens(session.context.total)} used, ${formatTokens(remaining)} remaining)${C.reset}`);
+        lines.push(`  ${contextBar}`);
+        lines.push('');
+        lines.push(`  ${dot(C.bgGrey, `${C.grey}stale ${formatTokens(session.context.stale)}${C.reset}`)}  ${dot(C.bgYellow, `${C.yellow}loaded ${formatTokens(session.context.loaded)}${C.reset}`)}  ${dot(C.bgGreen, `${C.green}active ${formatTokens(session.context.active)}${C.reset}`)}  ${dot(C.bgDark, `${C.dim}free ${formatTokens(remaining)}${C.reset}`)}`);
+        lines.push('');
+      } else {
+        lines.push(`  ${C.dim}CONTEXT WINDOW  (no data yet)${C.reset}`);
+      }
+
+      if (session.totals.totalTokens > 0) {
+        const mainTokens = Math.max(0, session.totals.totalTokens - session.totals.latestTotal);
+        const cost = getSessionCost(session.model, session.totals);
+        const cacheHitRate = getClaudeSessionCacheHitRate(session);
+        const sessionBar = solidBar([
+          { value: mainTokens, bg: C.bgBlue },
+          { value: session.totals.latestTotal, bg: C.bgPurple },
+        ], session.totals.totalTokens, barWidth);
+
+        lines.push('');
+        lines.push(`  ${C.dim}SESSION TOKENS${C.reset}  ${C.bold}${formatTokens(session.totals.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(in: ${formatTokens(session.totals.totalInput + session.totals.totalCacheRead + session.totals.totalCacheCreate)}  out: ${formatTokens(session.totals.totalOutput)}  cache hit: ${formatPercent(cacheHitRate)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(cost)}${C.reset}`);
+        lines.push(`  ${sessionBar}`);
+        lines.push('');
+        lines.push(`  ${dot(C.bgBlue, `${C.blue}cumulative ${formatTokens(session.totals.totalTokens)}${C.reset}`)}  ${dot(C.bgPurple, `${C.purple}latest turn ${formatTokens(session.totals.latestTotal)}${C.reset}`)}`);
+        renderSessionTimelinePanel(lines, {
+          timeline: session.timeline || [],
+          totalTokens: session.totals.totalTokens,
+          totalCost: cost,
+          startedAt: session.startedAt,
+          latestTimestamp: session.latestTimestamp,
+          width,
+          ascii,
+          nowMs: now.getTime(),
+        });
+        lines.push('');
+      }
     }
 
-    if (session.context.total > 0) {
-      const remaining = Math.max(0, contextLimit - session.context.total);
-      const contextBar = solidBar([
-        { value: session.context.stale, bg: C.bgGrey },
-        { value: session.context.loaded, bg: C.bgYellow },
-        { value: session.context.active, bg: C.bgGreen },
-        { value: remaining, bg: C.bgDark },
-      ], contextLimit, barWidth);
-
+    if (budget > 0) {
+      const sessionCost = sessions.reduce((sum, s) => sum + getSessionCost(s.model, s.totals), 0);
+      const estimatedSpend = summary?.estimatedCost ?? sessionCost;
+      const billedSpend = summary?.billedCost ?? null;
+      const remaining = budget - estimatedSpend;
+      const billedRemaining = billedSpend === null ? null : budget - billedSpend;
+      const remainColor = remaining >= 0 ? C.green : C.red;
       lines.push('');
-      const ctxPct = formatPercent((session.context.total / contextLimit) * 100);
-      lines.push(`  ${C.dim}CONTEXT WINDOW${C.reset}  ${C.bold}${ctxPct}${C.reset} ${C.dim}of ${formatTokens(contextLimit)}${C.reset}  ${C.dim}(${formatTokens(session.context.total)} used, ${formatTokens(remaining)} remaining)${C.reset}`);
-      lines.push(`  ${contextBar}`);
-      lines.push('');
-      lines.push(`  ${dot(C.bgGrey, `${C.grey}stale ${formatTokens(session.context.stale)}${C.reset}`)}  ${dot(C.bgYellow, `${C.yellow}loaded ${formatTokens(session.context.loaded)}${C.reset}`)}  ${dot(C.bgGreen, `${C.green}active ${formatTokens(session.context.active)}${C.reset}`)}  ${dot(C.bgDark, `${C.dim}free ${formatTokens(remaining)}${C.reset}`)}`);
-      lines.push('');
-    } else {
-      lines.push(`  ${C.dim}CONTEXT WINDOW  (no data yet)${C.reset}`);
+      lines.push(`  ${horizontalLine(width - 2)}`);
+      lines.push(`  ${C.bold}${C.cyan}BUDGET${C.reset}  ${C.dim}limit:${C.reset} ${C.bold}${formatCost(budget)}${C.reset}  ${C.dim}est spent:${C.reset} ${C.bold}${formatCost(estimatedSpend)}${C.reset}  ${C.dim}est remaining:${C.reset} ${remainColor}${C.bold}${formatCost(remaining)}${C.reset}`);
+      if (billedSpend !== null) {
+        const billedColor = billedRemaining >= 0 ? C.green : C.red;
+        lines.push(`  ${C.dim}BUDGET${C.reset}  ${C.dim}billed spent:${C.reset} ${C.bold}${formatCost(billedSpend)}${C.reset}  ${C.dim}billed remaining:${C.reset} ${billedColor}${C.bold}${formatCost(billedRemaining)}${C.reset}`);
+      }
     }
 
-    if (session.totals.totalTokens > 0) {
-      const mainTokens = Math.max(0, session.totals.totalTokens - session.totals.latestTotal);
-      const cost = getSessionCost(session.model, session.totals);
-      const cacheHitRate = getClaudeSessionCacheHitRate(session);
-      const sessionBar = solidBar([
-        { value: mainTokens, bg: C.bgBlue },
-        { value: session.totals.latestTotal, bg: C.bgPurple },
-      ], session.totals.totalTokens, barWidth);
-
+    if (projectMetrics?.length) {
       lines.push('');
-      lines.push(`  ${C.dim}SESSION TOKENS${C.reset}  ${C.bold}${formatTokens(session.totals.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(in: ${formatTokens(session.totals.totalInput + session.totals.totalCacheRead + session.totals.totalCacheCreate)}  out: ${formatTokens(session.totals.totalOutput)}  cache hit: ${formatPercent(cacheHitRate)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(cost)}${C.reset}`);
-      lines.push(`  ${sessionBar}`);
-      lines.push('');
-      lines.push(`  ${dot(C.bgBlue, `${C.blue}cumulative ${formatTokens(session.totals.totalTokens)}${C.reset}`)}  ${dot(C.bgPurple, `${C.purple}latest turn ${formatTokens(session.totals.latestTotal)}${C.reset}`)}`);
-      renderSessionTimelinePanel(lines, {
-        timeline: session.timeline || [],
-        totalTokens: session.totals.totalTokens,
-        totalCost: cost,
-        startedAt: session.startedAt,
-        latestTimestamp: session.latestTimestamp,
-        width,
-        ascii,
-        nowMs: now.getTime(),
-      });
-      lines.push('');
+      lines.push(`  ${horizontalLine(width - 2)}`);
+      lines.push(`  ${C.bold}${C.cyan}PROJECT BILLING${C.reset}`);
+      const shown = projectMetrics.slice(0, 5);
+      for (const metric of shown) {
+        const matchedSession = sessions.find(session => findMatchingProjectMetric(session, [metric]));
+        const name = matchedSession ? `${C.bold}${metric.name}${C.reset}` : metric.name;
+        lines.push(`  ${name}  ${C.dim}billed:${C.reset} ${C.bold}${formatCost(metric.cost)}${C.reset}  ${C.dim}in:${C.reset} ${formatTokens(metric.totalInput + metric.totalCacheRead + metric.totalCacheCreate)}  ${C.dim}out:${C.reset} ${formatTokens(metric.totalOutput)}`);
+      }
     }
-  }
-
-  if (budget > 0) {
-    const sessionCost = sessions.reduce((sum, s) => sum + getSessionCost(s.model, s.totals), 0);
-    const estimatedSpend = weeklyData?.estimatedCost ?? sessionCost;
-    const billedSpend = weeklyData?.billedCost ?? null;
-    const remaining = budget - estimatedSpend;
-    const billedRemaining = billedSpend === null ? null : budget - billedSpend;
-    const remainColor = remaining >= 0 ? C.green : C.red;
-    lines.push('');
-    lines.push(`  ${horizontalLine(width - 2)}`);
-    lines.push(`  ${C.bold}${C.cyan}BUDGET${C.reset}  ${C.dim}limit:${C.reset} ${C.bold}${formatCost(budget)}${C.reset}  ${C.dim}est spent:${C.reset} ${C.bold}${formatCost(estimatedSpend)}${C.reset}  ${C.dim}est remaining:${C.reset} ${remainColor}${C.bold}${formatCost(remaining)}${C.reset}`);
-    if (billedSpend !== null) {
-      const billedColor = billedRemaining >= 0 ? C.green : C.red;
-      lines.push(`  ${C.dim}BUDGET${C.reset}  ${C.dim}billed spent:${C.reset} ${C.bold}${formatCost(billedSpend)}${C.reset}  ${C.dim}billed remaining:${C.reset} ${billedColor}${C.bold}${formatCost(billedRemaining)}${C.reset}`);
-    }
-  }
-
-  if (projectMetrics?.length) {
-    lines.push('');
-    lines.push(`  ${horizontalLine(width - 2)}`);
-    lines.push(`  ${C.bold}${C.cyan}PROJECT BILLING${C.reset}`);
-    const shown = projectMetrics.slice(0, 5);
-    for (const metric of shown) {
-      const matchedSession = sessions.find(session => findMatchingProjectMetric(session, [metric]));
-      const name = matchedSession ? `${C.bold}${metric.name}${C.reset}` : metric.name;
-      lines.push(`  ${name}  ${C.dim}billed:${C.reset} ${C.bold}${formatCost(metric.cost)}${C.reset}  ${C.dim}in:${C.reset} ${formatTokens(metric.totalInput + metric.totalCacheRead + metric.totalCacheCreate)}  ${C.dim}out:${C.reset} ${formatTokens(metric.totalOutput)}`);
-    }
-  }
-
-  renderAdvisorPanel(lines, buildClaudeAdvisorMessages(sessions, weeklyData, budget, now.getTime()), width, ascii);
-
-  lines.push('');
-  lines.push(`  ${horizontalLine(width - 2)}`);
-  lines.push(`  ${C.bold}${C.cyan}WEEKLY SUMMARY${C.reset}`);
-
-  if (weeklyData) {
-    const machineText = weeklyData.machineCount > 1
-      ? `  ${C.dim}|${C.reset}  ${C.bold}${weeklyData.machineCount}${C.reset} machines`
-      : '';
-    const billedText = weeklyData.billedCost === null
-      ? `${C.dim}billed:${C.reset} ${C.bold}--${C.reset}`
-      : `${C.dim}billed:${C.reset} ${C.bold}${formatCost(weeklyData.billedCost)}${C.reset}`;
-    lines.push(`  ${C.dim}Total:${C.reset} ${C.bold}${formatTokens(weeklyData.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${weeklyData.sessionCount}${C.reset} sessions${machineText}  ${C.dim}|${C.reset}  ${C.dim}est:${C.reset} ${C.bold}${formatCost(weeklyData.estimatedCost)}${C.reset}  ${C.dim}|${C.reset}  ${billedText}`);
-    renderWeeklyChart(lines, weeklyData, barWidth, g);
-  } else {
-    lines.push(`  ${C.dim}No weekly data available yet.${C.reset}`);
+  } else if (activeTab === 'activity') {
+    renderActivityPanel(lines, analytics, width);
+  } else if (activeTab === 'scoring') {
+    renderScoringPanel(lines, analytics, width);
+  } else if (activeTab === 'breakdown') {
+    renderEnabledBreakdowns(lines, analytics, visibility, width);
+  } else if (activeTab === 'advisor') {
+    renderAdvisorPanel(lines, buildClaudeAdvisorMessages(sessions, summary, analytics, budget, now.getTime()), width, ascii);
+  } else if (activeTab === 'summary') {
+    renderClaudePeriodSummary(lines, summary, width, barWidth, g);
+  } else if (activeTab === 'settings') {
+    renderSettingsPanel(lines, 'claude', analyticsVisibility, width);
   }
 
   lines.push('');
@@ -840,6 +913,94 @@ function renderWeeklyChart(lines, weeklyData, barWidth, g) {
   }
 }
 
+function renderActivityPanel(lines, analytics, width) {
+  lines.push('');
+  lines.push(`  ${horizontalLine(width - 2)}`);
+  lines.push(`  ${C.bold}${C.cyan}ACTIVITY${C.reset}`);
+
+  const rows = analytics?.categoryBreakdown?.filter(row => row.turns > 0) || [];
+  if (!rows.length) {
+    lines.push(`  ${C.dim}No activity data available for this period.${C.reset}`);
+    return;
+  }
+
+  for (const row of rows.slice(0, 6)) {
+    lines.push(`  ${truncateText(row.category, 14)}  ${C.dim}${row.turns} turns${C.reset}  ${formatTokens(row.tokens)} tok  ${formatCost(row.estimatedCost)}  ${C.dim}one-shot:${C.reset} ${C.bold}${formatRate(row.oneShotRate)}${C.reset}`);
+  }
+}
+
+function formatScore(score) {
+  return score === null || score === undefined ? '--' : String(score).padStart(3);
+}
+
+function formatOptionalTokens(value) {
+  return value === null || value === undefined ? '--' : formatTokens(value);
+}
+
+function renderScoringPanel(lines, analytics, width) {
+  lines.push('');
+  lines.push(`  ${horizontalLine(width - 2)}`);
+  lines.push(`  ${C.bold}${C.cyan}CHAT SCORING${C.reset}`);
+
+  const rows = analytics?.chatScoring || [];
+  if (!rows.length) {
+    lines.push(`  ${C.dim}No chat scoring data available for this period.${C.reset}`);
+    return;
+  }
+
+  lines.push(`  ${C.dim}chat${' '.repeat(22)}score  turns   tok/turn  ctx/turn  context${C.reset}`);
+
+  for (const row of rows.slice(0, 8)) {
+    const label = truncateText(row.label || row.sessionId || 'unknown', 24);
+    const score = formatScore(row.score);
+    const tokenScore = formatScore(row.tokenEfficiencyScore);
+    const contextScore = formatScore(row.contextEfficiencyScore);
+    const context = row.contextTokens === null || row.contextTokens === undefined
+      ? '--'
+      : `${formatTokens(row.contextTokens)}${row.contextLimit ? `/${formatTokens(row.contextLimit)}` : ''}`;
+
+    lines.push(`  ${label.padEnd(24)}  ${C.bold}${score}${C.reset}  ${C.dim}${String(row.turns).padStart(5)}${C.reset}  ${String(formatOptionalTokens(row.avgTokensPerTurn)).padStart(9)}  ${String(formatOptionalTokens(row.contextPerTurn)).padStart(8)}  ${C.dim}${context}${C.reset}`);
+    lines.push(`  ${C.dim}${' '.repeat(26)}token ${tokenScore}  context ${contextScore}  ${formatCost(row.estimatedCost)}${C.reset}`);
+  }
+}
+
+function renderEnabledBreakdowns(lines, analytics, visibility, width) {
+  const hasBreakdowns = visibility?.tools || visibility?.mcp || visibility?.bash;
+
+  if (!hasBreakdowns) {
+    lines.push('');
+    lines.push(`  ${horizontalLine(width - 2)}`);
+    lines.push(`  ${C.bold}${C.cyan}BREAKDOWN${C.reset}`);
+    lines.push(`  ${C.dim}All breakdown panels are disabled for this provider.${C.reset}`);
+    return;
+  }
+
+  if (visibility?.tools) {
+    renderBreakdownPanel(lines, 'TOOLS', analytics?.toolBreakdown, 'tool', width, 8);
+  }
+  if (visibility?.mcp) {
+    renderBreakdownPanel(lines, 'MCP', analytics?.mcpBreakdown, 'server', width, 5);
+  }
+  if (visibility?.bash) {
+    renderBreakdownPanel(lines, 'SHELL', analytics?.bashBreakdown, 'command', width, 5);
+  }
+}
+
+function renderBreakdownPanel(lines, title, items, labelKey, width, limit) {
+  lines.push('');
+  lines.push(`  ${horizontalLine(width - 2)}`);
+  lines.push(`  ${C.bold}${C.cyan}${title}${C.reset}`);
+
+  if (!items?.length) {
+    lines.push(`  ${C.dim}No ${title.toLowerCase()} data available for this period.${C.reset}`);
+    return;
+  }
+
+  for (const item of items.slice(0, limit)) {
+    lines.push(`  ${truncateText(item[labelKey], 28)}  ${C.dim}${item.calls} calls${C.reset}  ${C.dim}${item.turns} turns${C.reset}  ${formatTokens(item.tokens)} tok  ${formatCost(item.estimatedCost)}`);
+  }
+}
+
 function renderRateLimitPanel(lines, title, rateLimit, width, colorBg, nowMs) {
   const barWidth = Math.max(20, width - 22);
   const usedPercent = Math.max(0, Math.min(100, rateLimit?.usedPercent || 0));
@@ -851,6 +1012,41 @@ function renderRateLimitPanel(lines, title, rateLimit, width, colorBg, nowMs) {
     { value: used, bg: colorBg },
     { value: remaining, bg: C.bgDark },
   ], 1000, barWidth)}`);
+}
+
+function renderClaudePeriodSummary(lines, summary, width, barWidth, g) {
+  lines.push('');
+  lines.push(`  ${horizontalLine(width - 2)}`);
+  lines.push(`  ${C.bold}${C.cyan}PERIOD SUMMARY${C.reset}`);
+
+  if (summary) {
+    const machineText = summary.machineCount > 1
+      ? `  ${C.dim}|${C.reset}  ${C.bold}${summary.machineCount}${C.reset} machines`
+      : '';
+    const billedText = summary.billedCost === null
+      ? `${C.dim}billed:${C.reset} ${C.bold}--${C.reset}`
+      : `${C.dim}billed:${C.reset} ${C.bold}${formatCost(summary.billedCost)}${C.reset}`;
+    lines.push(`  ${C.dim}${summary.window?.label || 'Period'}:${C.reset} ${C.bold}${formatTokens(summary.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${summary.sessionCount}${C.reset} sessions${machineText}  ${C.dim}|${C.reset}  ${C.dim}est:${C.reset} ${C.bold}${formatCost(summary.estimatedCost)}${C.reset}  ${C.dim}|${C.reset}  ${billedText}`);
+    renderWeeklyChart(lines, summary, barWidth, g);
+  } else {
+    lines.push(`  ${C.dim}No period data available yet.${C.reset}`);
+  }
+}
+
+function renderCodexPeriodSummary(lines, summary, width, barWidth, g) {
+  lines.push('');
+  lines.push(`  ${horizontalLine(width - 2)}`);
+  lines.push(`  ${C.bold}${C.cyan}PERIOD SUMMARY${C.reset}`);
+
+  if (summary) {
+    const machineText = summary.machineCount > 1
+      ? `  ${C.dim}|${C.reset}  ${C.bold}${summary.machineCount}${C.reset} machines`
+      : '';
+    lines.push(`  ${C.dim}${summary.window?.label || 'Period'}:${C.reset} ${C.bold}${formatTokens(summary.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${summary.sessionCount}${C.reset} sessions${machineText}  ${C.dim}|${C.reset}  ${C.bold}${formatCost(summary.estimatedCost)}${C.reset} est.`);
+    renderWeeklyChart(lines, summary, barWidth, g);
+  } else {
+    lines.push(`  ${C.dim}No period data available yet.${C.reset}`);
+  }
 }
 
 function renderCodexSummaryStrip(active, ascii) {
@@ -868,14 +1064,16 @@ function renderCodexSummaryStrip(active, ascii) {
 }
 
 // Consumes CodexData from codex.js — NOT the snapshot schema. See RENDERING ARCHITECTURE above.
-function renderCodexDetail(codexData, width, screenWidth, now, ascii, budget = 0, codexWeeklyData = null) {
+function renderCodexDetail(codexData, summary, analytics, width, screenWidth, now, ascii, budget = 0, period = '7d', detailTab = 'overview', analyticsVisibility = null) {
   const lines = [];
   const active = codexData?.activeSession || null;
   const barWidth = Math.max(30, width - 22);
   const g = glyphs(ascii);
+  const activeTab = ensureDetailTab(detailTab, 'codex', analyticsVisibility);
+  const visibility = normalizeAnalyticsVisibility(analyticsVisibility).codex;
 
   lines.push('');
-  lines.push(renderHeader({ provider: 'codex', viewMode: 'detail', width, now }));
+  lines.push(renderHeader({ provider: 'codex', viewMode: 'detail', period, width, now }));
 
   if (active) {
     lines.push('');
@@ -884,83 +1082,84 @@ function renderCodexDetail(codexData, width, screenWidth, now, ascii, budget = 0
 
   lines.push('');
   lines.push(`  ${horizontalLine(width - 2, g.line)}`);
-
-  if (!active) {
-    lines.push('');
-    lines.push(`  ${C.dim}No Codex sessions detected.${C.reset}`);
-    lines.push(`  ${C.dim}Start a Codex session to see live limit usage.${C.reset}`);
-  } else {
-    lines.push('');
-    lines.push(`  ${C.bold}${active.threadName}${C.reset} ${C.dim}(${active.id.slice(0, 8)})${C.reset}  ${C.dim}${active.workspaceLabel}${C.reset}`);
-
-    renderRateLimitPanel(lines, 'PRIMARY LIMIT', active.rateLimits?.primary, width, C.bgYellow, now.getTime());
-    renderRateLimitPanel(lines, 'SECONDARY LIMIT', active.rateLimits?.secondary, width, C.bgPurple, now.getTime());
-
-    const cachedContext = Math.min(active.lastCachedInputTokens, active.currentContextTokens);
-    const freshContext = Math.max(active.lastInputTokens - active.lastCachedInputTokens, 0);
-    const outputAccent = active.lastOutputTokens + active.lastReasoningOutputTokens;
-    const usedContext = Math.min(active.currentContextTokens, cachedContext + freshContext + outputAccent);
-    const remaining = Math.max(0, active.modelContextWindow - usedContext);
-    const contextBar = solidBar([
-      { value: cachedContext, bg: C.bgBlue },
-      { value: freshContext, bg: C.bgGreen },
-      { value: outputAccent, bg: C.bgPurple },
-      { value: remaining, bg: C.bgDark },
-    ], active.modelContextWindow || 1, barWidth);
-
-    lines.push('');
-    lines.push(`  ${C.dim}CONTEXT WINDOW${C.reset}  ${C.bold}${formatTokens(active.currentContextTokens)}${C.reset} ${C.dim}used of ${formatTokens(active.modelContextWindow)}${C.reset}  ${C.dim}(${formatTokens(remaining)} remaining)${C.reset}`);
-    lines.push(`  ${contextBar}`);
-    lines.push('');
-    lines.push(`  ${dot(C.bgBlue, `${C.blue}cached ${formatTokens(cachedContext)}${C.reset}`)}  ${dot(C.bgGreen, `${C.green}fresh ${formatTokens(freshContext)}${C.reset}`)}  ${dot(C.bgPurple, `${C.purple}out+reason ${formatTokens(outputAccent)}${C.reset}`)}  ${dot(C.bgDark, `${C.dim}free ${formatTokens(remaining)}${C.reset}`)}`);
-
-    const sessionCost = getCodexSessionCost(active);
-    const cacheHitRate = getCodexCacheHitRate(active);
-    lines.push('');
-    lines.push(`  ${C.dim}TOKEN TOTALS${C.reset}  ${C.bold}${formatTokens(active.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(last ${formatTokens(active.lastTokens)}  cache ${formatTokens(active.totalCachedInputTokens)}  out ${formatTokens(active.totalOutputTokens)}  reason ${formatTokens(active.totalReasoningOutputTokens)}  cache hit: ${formatPercent(cacheHitRate)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(sessionCost)}${C.reset}`);
-    renderSessionTimelinePanel(lines, {
-      timeline: active.timeline || [],
-      totalTokens: active.totalTokens,
-      totalCost: sessionCost,
-      startedAt: active.startedAt,
-      latestTimestamp: active.latestTimestamp,
-      width,
-      ascii,
-      nowMs: now.getTime(),
-    });
-
-    if (budget > 0) {
-      const totalSpend = getCodexTotalCost(codexData);
-      const remaining = budget - totalSpend;
-      const remainColor = remaining >= 0 ? C.green : C.red;
-      lines.push(`  ${C.dim}BUDGET${C.reset}  ${C.dim}limit:${C.reset} ${C.bold}${formatCost(budget)}${C.reset}  ${C.dim}spent:${C.reset} ${C.bold}${formatCost(totalSpend)}${C.reset}  ${C.dim}remaining:${C.reset} ${remainColor}${C.bold}${formatCost(remaining)}${C.reset}`);
-    }
-
-    lines.push('');
-    lines.push(`  ${C.bold}${C.cyan}RECENT THREADS${C.reset}`);
-    for (const thread of codexData.recentThreads || []) {
-      const cwd = thread.matchCwd ? `${C.green}cwd${C.reset}` : `${C.dim}other${C.reset}`;
-      const live = thread.liveDataFound ? `${C.blue}live${C.reset}` : `${C.dim}no-live${C.reset}`;
-      const workspace = thread.workspaceLabel ? `${C.dim}${thread.workspaceLabel}${C.reset}` : `${C.dim}unknown${C.reset}`;
-      const threadName = thread.matchCwd ? `${C.bold}${thread.threadName}${C.reset}` : thread.threadName;
-      lines.push(`  ${threadName}  ${workspace}  ${cwd}  ${live}`);
-    }
-  }
-
-  renderAdvisorPanel(lines, buildCodexAdvisorMessages(codexData, budget, now.getTime()), width, ascii);
-
+  lines.push(`  ${renderDetailTabs('codex', activeTab, analyticsVisibility)}`);
   lines.push('');
-  lines.push(`  ${horizontalLine(width - 2)}`);
-  lines.push(`  ${C.bold}${C.cyan}WEEKLY SUMMARY${C.reset}`);
+  lines.push(`  ${horizontalLine(width - 2, g.line)}`);
 
-  if (codexWeeklyData) {
-    const machineText = codexWeeklyData.machineCount > 1
-      ? `  ${C.dim}|${C.reset}  ${C.bold}${codexWeeklyData.machineCount}${C.reset} machines`
-      : '';
-    lines.push(`  ${C.dim}Total:${C.reset} ${C.bold}${formatTokens(codexWeeklyData.totalTokens)}${C.reset} tokens  ${C.dim}|${C.reset}  ${C.bold}${codexWeeklyData.sessionCount}${C.reset} sessions${machineText}  ${C.dim}|${C.reset}  ${C.bold}${formatCost(codexWeeklyData.estimatedCost)}${C.reset} est.`);
-    renderWeeklyChart(lines, codexWeeklyData, barWidth, g);
-  } else {
-    lines.push(`  ${C.dim}No weekly data available yet.${C.reset}`);
+  if (activeTab === 'overview') {
+    if (!active) {
+      lines.push('');
+      lines.push(`  ${C.dim}No Codex sessions detected.${C.reset}`);
+      lines.push(`  ${C.dim}Start a Codex session to see live limit usage.${C.reset}`);
+    } else {
+      lines.push('');
+      lines.push(`  ${C.bold}${active.threadName}${C.reset} ${C.dim}(${active.id.slice(0, 8)})${C.reset}  ${C.dim}${active.workspaceLabel}${C.reset}`);
+
+      renderRateLimitPanel(lines, 'PRIMARY LIMIT', active.rateLimits?.primary, width, C.bgYellow, now.getTime());
+      renderRateLimitPanel(lines, 'SECONDARY LIMIT', active.rateLimits?.secondary, width, C.bgPurple, now.getTime());
+
+      const cachedContext = Math.min(active.lastCachedInputTokens, active.currentContextTokens);
+      const freshContext = Math.max(active.lastInputTokens - active.lastCachedInputTokens, 0);
+      const outputAccent = active.lastOutputTokens + active.lastReasoningOutputTokens;
+      const usedContext = Math.min(active.currentContextTokens, cachedContext + freshContext + outputAccent);
+      const remaining = Math.max(0, active.modelContextWindow - usedContext);
+      const contextBar = solidBar([
+        { value: cachedContext, bg: C.bgBlue },
+        { value: freshContext, bg: C.bgGreen },
+        { value: outputAccent, bg: C.bgPurple },
+        { value: remaining, bg: C.bgDark },
+      ], active.modelContextWindow || 1, barWidth);
+
+      lines.push('');
+      lines.push(`  ${C.dim}CONTEXT WINDOW${C.reset}  ${C.bold}${formatTokens(active.currentContextTokens)}${C.reset} ${C.dim}used of ${formatTokens(active.modelContextWindow)}${C.reset}  ${C.dim}(${formatTokens(remaining)} remaining)${C.reset}`);
+      lines.push(`  ${contextBar}`);
+      lines.push('');
+      lines.push(`  ${dot(C.bgBlue, `${C.blue}cached ${formatTokens(cachedContext)}${C.reset}`)}  ${dot(C.bgGreen, `${C.green}fresh ${formatTokens(freshContext)}${C.reset}`)}  ${dot(C.bgPurple, `${C.purple}out+reason ${formatTokens(outputAccent)}${C.reset}`)}  ${dot(C.bgDark, `${C.dim}free ${formatTokens(remaining)}${C.reset}`)}`);
+
+      const sessionCost = getCodexSessionCost(active);
+      const cacheHitRate = getCodexCacheHitRate(active);
+      lines.push('');
+      lines.push(`  ${C.dim}TOKEN TOTALS${C.reset}  ${C.bold}${formatTokens(active.totalTokens)}${C.reset} ${C.dim}total${C.reset}  ${C.dim}(last ${formatTokens(active.lastTokens)}  cache ${formatTokens(active.totalCachedInputTokens)}  out ${formatTokens(active.totalOutputTokens)}  reason ${formatTokens(active.totalReasoningOutputTokens)}  cache hit: ${formatPercent(cacheHitRate)})${C.reset}  ${C.dim}cost:${C.reset} ${C.bold}${formatCost(sessionCost)}${C.reset}`);
+      renderSessionTimelinePanel(lines, {
+        timeline: active.timeline || [],
+        totalTokens: active.totalTokens,
+        totalCost: sessionCost,
+        startedAt: active.startedAt,
+        latestTimestamp: active.latestTimestamp,
+        width,
+        ascii,
+        nowMs: now.getTime(),
+      });
+
+      if (budget > 0) {
+        const totalSpend = summary?.estimatedCost ?? getCodexTotalCost(codexData);
+        const remaining = budget - totalSpend;
+        const remainColor = remaining >= 0 ? C.green : C.red;
+        lines.push(`  ${C.dim}BUDGET${C.reset}  ${C.dim}limit:${C.reset} ${C.bold}${formatCost(budget)}${C.reset}  ${C.dim}spent:${C.reset} ${C.bold}${formatCost(totalSpend)}${C.reset}  ${C.dim}remaining:${C.reset} ${remainColor}${C.bold}${formatCost(remaining)}${C.reset}`);
+      }
+
+      lines.push('');
+      lines.push(`  ${C.bold}${C.cyan}RECENT THREADS${C.reset}`);
+      for (const thread of codexData.recentThreads || []) {
+        const cwd = thread.matchCwd ? `${C.green}cwd${C.reset}` : `${C.dim}other${C.reset}`;
+        const live = thread.liveDataFound ? `${C.blue}live${C.reset}` : `${C.dim}no-live${C.reset}`;
+        const workspace = thread.workspaceLabel ? `${C.dim}${thread.workspaceLabel}${C.reset}` : `${C.dim}unknown${C.reset}`;
+        const threadName = thread.matchCwd ? `${C.bold}${thread.threadName}${C.reset}` : thread.threadName;
+        lines.push(`  ${threadName}  ${workspace}  ${cwd}  ${live}`);
+      }
+    }
+  } else if (activeTab === 'activity') {
+    renderActivityPanel(lines, analytics, width);
+  } else if (activeTab === 'scoring') {
+    renderScoringPanel(lines, analytics, width);
+  } else if (activeTab === 'breakdown') {
+    renderEnabledBreakdowns(lines, analytics, visibility, width);
+  } else if (activeTab === 'advisor') {
+    renderAdvisorPanel(lines, buildCodexAdvisorMessages(codexData, summary, analytics, budget, now.getTime()), width, ascii);
+  } else if (activeTab === 'summary') {
+    renderCodexPeriodSummary(lines, summary, width, barWidth, g);
+  } else if (activeTab === 'settings') {
+    renderSettingsPanel(lines, 'codex', analyticsVisibility, width);
   }
 
   lines.push('');
@@ -986,16 +1185,40 @@ export function renderDashboard(state) {
   const budget = state.budget || 0;
 
   if (state.viewMode === 'compact') {
-    return renderCompact(state.provider, state.claudeSessions || [], state.codexData || null, width, screenWidth, now, ascii, budget, state.claudeWeeklyData || null);
+    return renderCompact(
+      state.provider,
+      state.claudeSessions || [],
+      state.codexData || null,
+      width,
+      screenWidth,
+      now,
+      ascii,
+      budget,
+      state.provider === 'claude' ? (state.claudeSummary || null) : (state.codexSummary || null),
+      state.period || '7d',
+    );
   }
 
   if (state.provider === 'codex') {
-    return renderCodexDetail(state.codexData || null, width, screenWidth, now, ascii, budget, state.codexWeeklyData || null);
+    return renderCodexDetail(
+      state.codexData || null,
+      state.codexSummary || null,
+      state.codexAnalytics || null,
+      width,
+      screenWidth,
+      now,
+      ascii,
+      budget,
+      state.period || '7d',
+      state.detailTab || 'overview',
+      state.analyticsVisibility || null,
+    );
   }
 
   return renderClaudeDetail(
     state.claudeSessions || [],
-    state.claudeWeeklyData || null,
+    state.claudeSummary || null,
+    state.claudeAnalytics || null,
     state.claudeProjectMetrics || [],
     state.claudeRateLimits || null,
     width,
@@ -1003,5 +1226,8 @@ export function renderDashboard(state) {
     now,
     ascii,
     budget,
+    state.period || '7d',
+    state.detailTab || 'overview',
+    state.analyticsVisibility || null,
   );
 }

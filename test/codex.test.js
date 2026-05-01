@@ -21,6 +21,11 @@ test('collectCodexData prefers latest cwd match over newest overall thread', () 
   assert.equal(data.activeSession.totalTokens, 83100);
   assert.equal(data.activeSession.currentContextTokens, 24800);
   assert.equal(data.activeSession.timeline.length, 3);
+  assert.equal(data.activeSession.turns.length, 3);
+  assert.equal(data.activeSession.turns[0].userText, 'inspect the failing test and run pytest');
+  assert.equal(data.activeSession.turns[0].toolCalls[0].name, 'exec_command');
+  assert.equal(data.activeSession.turns[1].toolCalls[0].name, 'apply_patch');
+  assert.equal(data.activeSession.turns[2].toolCalls[0].command, 'git status');
   assert.equal(data.activeSession.timeline[0].totalTokens, 20900);
   assert.equal(data.activeSession.timeline[2].totalTokens, 83100);
   assert.equal(data.recentThreads.length, 2);
@@ -141,7 +146,97 @@ test('collectCodexData includes the newest live session file before session_inde
   assert.equal(data.activeSession.threadName, 'ai-gen-tooling');
   assert.equal(data.activeSession.rateLimits?.primary?.usedPercent, 100);
   assert.equal(data.activeSession.rateLimits?.secondary?.usedPercent, 76);
+  assert.equal(data.activeSession.turns.length, 1);
   assert.equal(data.recentThreads[0].id, '22222222-1111-2222-3333-444444444444');
   assert.equal(data.recentThreads[0].matchCwd, true);
   assert.equal(data.recentThreads[0].liveDataFound, true);
+});
+
+test('collectCodexData extracts nested exec_command calls from parallel tool wrappers', () => {
+  const root = mkdtempSync(join(tmpdir(), 'token-gauge-codex-parallel-'));
+  const codexDir = join(root, '.codex');
+  const sessionsDir = join(codexDir, 'sessions', '2026', '04', '12');
+  mkdirSync(sessionsDir, { recursive: true });
+
+  writeFileSync(join(codexDir, 'session_index.jsonl'), `${JSON.stringify({
+    id: '33333333-1111-2222-3333-444444444444',
+    thread_name: 'Parallel thread',
+    updated_at: '2026-04-12T12:06:00.000Z',
+  })}\n`);
+
+  writeFileSync(join(sessionsDir, 'rollout-2026-04-12T12-06-00-33333333-1111-2222-3333-444444444444.jsonl'), [
+    JSON.stringify({
+      timestamp: '2026-04-12T12:06:00.000Z',
+      type: 'session_meta',
+      payload: {
+        id: '33333333-1111-2222-3333-444444444444',
+        timestamp: '2026-04-12T12:06:00.000Z',
+        cwd: '/Users/dev/ai-gen-tooling',
+        originator: 'Codex Desktop',
+        model_provider: 'openai',
+      },
+    }),
+    JSON.stringify({
+      timestamp: '2026-04-12T12:06:01.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'user_message',
+        message: 'run tests in parallel',
+      },
+    }),
+    JSON.stringify({
+      timestamp: '2026-04-12T12:06:02.000Z',
+      type: 'response_item',
+      payload: {
+        type: 'function_call',
+        name: 'parallel',
+        arguments: JSON.stringify({
+          tool_uses: [
+            {
+              recipient_name: 'functions.exec_command',
+              parameters: { cmd: 'pytest -q' },
+            },
+          ],
+        }),
+        call_id: 'call-parallel',
+      },
+    }),
+    JSON.stringify({
+      timestamp: '2026-04-12T12:06:03.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: {
+          total_token_usage: {
+            input_tokens: 1000,
+            cached_input_tokens: 500,
+            output_tokens: 100,
+            reasoning_output_tokens: 20,
+            total_tokens: 1120,
+          },
+          last_token_usage: {
+            input_tokens: 1000,
+            cached_input_tokens: 500,
+            output_tokens: 100,
+            reasoning_output_tokens: 20,
+            total_tokens: 1120,
+          },
+          model_context_window: 258400,
+        },
+        rate_limits: {
+          primary: { used_percent: 1, resets_at: 1776013596 },
+          secondary: { used_percent: 1, resets_at: 1776358904 },
+        },
+      },
+    }),
+  ].join('\n'));
+
+  const data = collectCodexData({
+    codexDir,
+    cwd: '/Users/dev/ai-gen-tooling',
+    useScanIndex: false,
+  });
+
+  assert.equal(data.activeSession.turns[0].toolCalls[0].name, 'exec_command');
+  assert.equal(data.activeSession.turns[0].toolCalls[0].command, 'pytest -q');
 });

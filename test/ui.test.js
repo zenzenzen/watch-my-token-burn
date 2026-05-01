@@ -28,7 +28,9 @@ const codexData = collectCodexData({
   cwd: '/Users/dev/ai-gen-tooling',
 });
 
-const weeklyData = {
+const claudeSummary = {
+  period: '7d',
+  window: { timezone: 'local', start: '2026-03-28T00:00:00.000', end: '2026-04-03T23:59:59.999', label: 'Last 7 days' },
   totalTokens: 5500,
   sessionCount: 1,
   estimatedCost: 0.17,
@@ -43,13 +45,37 @@ const weeklyData = {
     { label: 'Fri', tokens: 5500, estimatedCost: 0.17, isToday: true },
   ],
 };
+const claudeAnalytics = {
+  window: claudeSummary.window,
+  totals: { turns: 2, sessions: 1, tokens: 5500, estimatedCost: 0.17 },
+  categoryBreakdown: [
+    { category: 'coding', turns: 1, tokens: 3700, estimatedCost: 0.11, editTurns: 1, retryTurns: 1, oneShotTurns: 0, oneShotRate: 0 },
+    { category: 'testing', turns: 1, tokens: 1800, estimatedCost: 0.06, editTurns: 0, retryTurns: 0, oneShotTurns: 0, oneShotRate: null },
+  ],
+  chatScoring: [
+    { sessionId: 'claude-1', label: 'project-one', turns: 2, tokens: 5500, estimatedCost: 0.17, contextTokens: 42000, contextLimit: 200000, avgTokensPerTurn: 2750, contextPerTurn: 21000, score: 53, tokenEfficiencyScore: 96, contextEfficiencyScore: 0 },
+  ],
+  toolBreakdown: [
+    { tool: 'exec_command', calls: 1, turns: 1, tokens: 1800, estimatedCost: 0.06 },
+    { tool: 'apply_patch', calls: 1, turns: 1, tokens: 3700, estimatedCost: 0.11 },
+  ],
+  mcpBreakdown: [
+    { server: 'playwright', calls: 1, turns: 1, tokens: 900, estimatedCost: 0.03 },
+  ],
+  bashBreakdown: [
+    { command: 'pytest', calls: 1, turns: 1, tokens: 1800, estimatedCost: 0.06 },
+    { command: 'git status', calls: 1, turns: 1, tokens: 600, estimatedCost: 0.02 },
+  ],
+};
 const claudeRateLimits = {
   primary: { usedPercent: 41, resetsAt: 1775191480 },
   secondary: { usedPercent: 12, resetsAt: 1775634396 },
   updatedAt: '2026-04-12T10:00:00.000Z',
 };
 
-const codexWeeklyData = {
+const codexSummary = {
+  period: '7d',
+  window: { timezone: 'local', start: '2026-03-28T00:00:00.000', end: '2026-04-03T23:59:59.999', label: 'Last 7 days' },
   totalTokens: 12000,
   sessionCount: 3,
   estimatedCost: 0.08,
@@ -63,72 +89,105 @@ const codexWeeklyData = {
     { label: 'Fri', tokens: 3000, isToday: true },
   ],
 };
+const codexAnalytics = {
+  window: codexSummary.window,
+  totals: { turns: 3, sessions: 2, tokens: 12000, estimatedCost: 0.08 },
+  categoryBreakdown: [
+    { category: 'coding', turns: 2, tokens: 9000, estimatedCost: 0.06, editTurns: 2, retryTurns: 1, oneShotTurns: 1, oneShotRate: 0.5 },
+    { category: 'exploration', turns: 1, tokens: 3000, estimatedCost: 0.02, editTurns: 0, retryTurns: 0, oneShotTurns: 0, oneShotRate: null },
+  ],
+  chatScoring: [
+    { sessionId: 'codex-1', label: 'Matching tg thread', turns: 3, tokens: 12000, estimatedCost: 0.08, contextTokens: 6000, contextLimit: 200000, avgTokensPerTurn: 4000, contextPerTurn: 2000, score: 92, tokenEfficiencyScore: 89, contextEfficiencyScore: 96 },
+  ],
+  toolBreakdown: [
+    { tool: 'exec_command', calls: 2, turns: 2, tokens: 7000, estimatedCost: 0.05 },
+    { tool: 'mcp__playwright__browser_snapshot', calls: 1, turns: 1, tokens: 3000, estimatedCost: 0.02 },
+  ],
+  mcpBreakdown: [
+    { server: 'playwright', calls: 1, turns: 1, tokens: 3000, estimatedCost: 0.02 },
+  ],
+  bashBreakdown: [
+    { command: 'pytest', calls: 1, turns: 1, tokens: 4000, estimatedCost: 0.03 },
+  ],
+};
 
 test('renderDashboard smoke tests all four screens', () => {
   const claudeCompact = renderDashboard({
     provider: 'claude',
     viewMode: 'compact',
     claudeSessions,
-    claudeWeeklyData: weeklyData,
+    claudeSummary,
     claudeProjectMetrics,
     claudeRateLimits,
     codexData,
+    period: '7d',
     cols: 100,
   });
   const claudeDetail = renderDashboard({
     provider: 'claude',
     viewMode: 'detail',
     claudeSessions,
-    claudeWeeklyData: weeklyData,
+    claudeSummary,
+    claudeAnalytics,
     claudeProjectMetrics,
     claudeRateLimits,
     codexData,
+    period: '7d',
     cols: 100,
   });
   const codexCompact = renderDashboard({
     provider: 'codex',
     viewMode: 'compact',
     claudeSessions,
-    claudeWeeklyData: weeklyData,
+    codexSummary,
     codexData,
+    period: '7d',
     cols: 100,
   });
   const codexDetail = renderDashboard({
     provider: 'codex',
     viewMode: 'detail',
     claudeSessions,
-    claudeWeeklyData: weeklyData,
     codexData,
-    codexWeeklyData,
+    codexSummary,
+    codexAnalytics,
+    period: '7d',
     cols: 100,
   });
 
   assert.match(stripAnsi(claudeCompact), /TOKEN GAUGE/);
   assert.match(stripAnsi(claudeCompact), /project-one/);
   assert.match(stripAnsi(claudeCompact), /cache 33%/);
-  assert.match(stripAnsi(claudeDetail), /WEEKLY SUMMARY/);
+  assert.match(stripAnsi(claudeDetail), /OVERVIEW/);
+  assert.match(stripAnsi(claudeDetail), /ACTIVITY/);
+  assert.match(stripAnsi(claudeDetail), /SCORING/);
+  assert.match(stripAnsi(claudeDetail), /BREAKDOWN/);
+  assert.match(stripAnsi(claudeDetail), /ADVISOR/);
+  assert.match(stripAnsi(claudeDetail), /SUMMARY/);
+  assert.match(stripAnsi(claudeDetail), /SETTINGS/);
   assert.match(stripAnsi(claudeDetail), /PRIMARY LIMIT/);
   assert.match(stripAnsi(claudeDetail), /SECONDARY LIMIT/);
   assert.match(stripAnsi(claudeDetail), /Claude rate limits cached from hook data/);
   assert.match(stripAnsi(claudeDetail), /PROJECT BILLING/);
-  assert.match(stripAnsi(claudeDetail), /EFFICIENCY ADVISOR/);
-  assert.match(stripAnsi(claudeDetail), /Cache hits are only 33%/);
   assert.match(stripAnsi(claudeDetail), /project-one/);
   assert.match(stripAnsi(claudeDetail), /billed: \$0\.42/);
-  assert.match(stripAnsi(claudeDetail), /est: \$0\.170/);
   assert.match(stripAnsi(claudeDetail), /cache hit: 33%/);
   assert.match(stripAnsi(claudeDetail), /SESSION BURN/);
   assert.match(stripAnsi(claudeDetail), /avg \$[0-9.]+\/hr/);
   assert.match(stripAnsi(codexCompact), /Matching tg thread/);
   assert.match(stripAnsi(codexCompact), /cache 38%/);
+  assert.match(stripAnsi(codexDetail), /OVERVIEW/);
+  assert.match(stripAnsi(codexDetail), /ACTIVITY/);
+  assert.match(stripAnsi(codexDetail), /SCORING/);
+  assert.match(stripAnsi(codexDetail), /BREAKDOWN/);
+  assert.match(stripAnsi(codexDetail), /ADVISOR/);
+  assert.match(stripAnsi(codexDetail), /SUMMARY/);
+  assert.match(stripAnsi(codexDetail), /SETTINGS/);
   assert.match(stripAnsi(codexDetail), /PRIMARY LIMIT/);
   assert.match(stripAnsi(codexDetail), /cache hit: 38%/);
   assert.match(stripAnsi(codexDetail), /SESSION BURN/);
-  assert.match(stripAnsi(codexDetail), /EFFICIENCY ADVISOR/);
-  assert.match(stripAnsi(codexDetail), /Cache hits are only 38%/);
   assert.match(stripAnsi(codexDetail), /avg \$[0-9.]+\/hr/);
   assert.match(stripAnsi(codexDetail), /RECENT THREADS/);
-  assert.match(stripAnsi(codexDetail), /WEEKLY SUMMARY/);
 });
 
 test('renderDashboard keeps lines within the requested width', () => {
@@ -137,36 +196,42 @@ test('renderDashboard keeps lines within the requested width', () => {
       provider: 'claude',
       viewMode: 'compact',
       claudeSessions,
-      claudeWeeklyData: weeklyData,
+      claudeSummary,
       claudeProjectMetrics,
       claudeRateLimits,
       codexData,
+      period: '7d',
       cols: 50,
     }),
     renderDashboard({
       provider: 'claude',
       viewMode: 'detail',
       claudeSessions,
-      claudeWeeklyData: weeklyData,
+      claudeSummary,
+      claudeAnalytics,
       claudeProjectMetrics,
       claudeRateLimits,
       codexData,
+      period: '7d',
       cols: 50,
     }),
     renderDashboard({
       provider: 'codex',
       viewMode: 'compact',
       claudeSessions,
-      claudeWeeklyData: weeklyData,
       codexData,
+      codexSummary,
+      period: '7d',
       cols: 50,
     }),
     renderDashboard({
       provider: 'codex',
       viewMode: 'detail',
       claudeSessions,
-      claudeWeeklyData: weeklyData,
       codexData,
+      codexSummary,
+      codexAnalytics,
+      period: '7d',
       cols: 50,
     }),
   ];
@@ -181,10 +246,12 @@ test('renderDashboard shows budget remaining when budget is set', () => {
     provider: 'claude',
     viewMode: 'detail',
     claudeSessions,
-    claudeWeeklyData: weeklyData,
+    claudeSummary,
+    claudeAnalytics,
     claudeProjectMetrics,
     claudeRateLimits,
     codexData,
+    period: '7d',
     cols: 100,
     budget: 50,
   });
@@ -192,8 +259,10 @@ test('renderDashboard shows budget remaining when budget is set', () => {
     provider: 'codex',
     viewMode: 'detail',
     claudeSessions,
-    claudeWeeklyData: weeklyData,
     codexData,
+    codexSummary,
+    codexAnalytics,
+    period: '7d',
     cols: 100,
     budget: 50,
   });
@@ -203,17 +272,113 @@ test('renderDashboard shows budget remaining when budget is set', () => {
   assert.match(stripAnsi(codexDetail), /BUDGET/);
 });
 
-test('renderDashboard codex detail shows fallback when no weekly data provided', () => {
-  const output = renderDashboard({
+test('renderDashboard detail sub-tabs render only the selected analytics section', () => {
+  const claudeActivity = renderDashboard({
+    provider: 'claude',
+    viewMode: 'detail',
+    detailTab: 'activity',
+    analyticsVisibility: {
+      claude: { activity: true, tools: true, mcp: true, bash: true, advisor: true, summary: true },
+      codex: { activity: true, tools: true, mcp: true, bash: true, advisor: true, summary: true },
+    },
+    claudeSessions,
+    claudeSummary,
+    claudeAnalytics,
+    claudeProjectMetrics,
+    claudeRateLimits,
+    cols: 100,
+  });
+  const codexAdvisor = renderDashboard({
     provider: 'codex',
     viewMode: 'detail',
-    claudeSessions,
+    detailTab: 'advisor',
+    analyticsVisibility: {
+      claude: { activity: true, tools: true, mcp: true, bash: true, advisor: true, summary: true },
+      codex: { activity: true, tools: true, mcp: true, bash: true, advisor: true, summary: true },
+    },
     codexData,
+    codexSummary,
+    codexAnalytics,
     cols: 100,
   });
 
-  assert.match(stripAnsi(output), /WEEKLY SUMMARY/);
-  assert.match(stripAnsi(output), /No weekly data available yet/);
+  assert.match(stripAnsi(claudeActivity), /ACTIVITY/);
+  assert.doesNotMatch(stripAnsi(claudeActivity), /PROJECT BILLING/);
+  assert.doesNotMatch(stripAnsi(claudeActivity), /PERIOD SUMMARY/);
+  assert.match(stripAnsi(codexAdvisor), /EFFICIENCY ADVISOR/);
+  assert.doesNotMatch(stripAnsi(codexAdvisor), /RECENT THREADS/);
+  assert.doesNotMatch(stripAnsi(codexAdvisor), /PERIOD SUMMARY/);
+});
+
+test('renderDashboard scoring tab shows per-chat efficiency scores', () => {
+  const output = renderDashboard({
+    provider: 'codex',
+    viewMode: 'detail',
+    detailTab: 'scoring',
+    codexData,
+    codexSummary,
+    codexAnalytics,
+    cols: 100,
+  });
+
+  const cleaned = stripAnsi(output);
+  assert.match(cleaned, /CHAT SCORING/);
+  assert.match(cleaned, /Matching tg thread/);
+  assert.match(cleaned, /tok\/turn/);
+  assert.match(cleaned, /ctx\/turn/);
+  assert.doesNotMatch(cleaned, /TOOLS/);
+});
+
+test('renderDashboard settings tab reflects analytics toggles and breakdown availability', () => {
+  const settingsOutput = renderDashboard({
+    provider: 'codex',
+    viewMode: 'detail',
+    detailTab: 'settings',
+    analyticsVisibility: {
+      claude: { activity: true, tools: true, mcp: true, bash: true, advisor: true, summary: true },
+      codex: { activity: false, tools: true, mcp: false, bash: false, advisor: true, summary: true },
+    },
+    codexData,
+    codexSummary,
+    codexAnalytics,
+    cols: 100,
+  });
+  const breakdownOutput = renderDashboard({
+    provider: 'codex',
+    viewMode: 'detail',
+    detailTab: 'settings',
+    analyticsVisibility: {
+      claude: { activity: true, tools: true, mcp: true, bash: true, advisor: true, summary: true },
+      codex: { activity: true, tools: false, mcp: false, bash: false, advisor: true, summary: true },
+    },
+    codexData,
+    codexSummary,
+    codexAnalytics,
+    cols: 100,
+  });
+
+  assert.match(stripAnsi(settingsOutput), /CODEX SETTINGS/);
+  assert.match(stripAnsi(settingsOutput), /Activity +off/);
+  assert.match(stripAnsi(settingsOutput), /Scoring +ON/);
+  assert.match(stripAnsi(settingsOutput), /Tools +ON/);
+  assert.match(stripAnsi(settingsOutput), /4\/7 analytics panels enabled/);
+  assert.doesNotMatch(stripAnsi(breakdownOutput), /BREAKDOWN/);
+  assert.match(stripAnsi(breakdownOutput), /CODEX SETTINGS/);
+});
+
+test('renderDashboard codex detail shows fallback when no period data provided', () => {
+  const output = renderDashboard({
+    provider: 'codex',
+    viewMode: 'detail',
+    detailTab: 'summary',
+    claudeSessions,
+    codexData,
+    period: '7d',
+    cols: 100,
+  });
+
+  assert.match(stripAnsi(output), /PERIOD SUMMARY/);
+  assert.match(stripAnsi(output), /No period data available yet/);
 });
 
 test('renderDashboard ASCII mode avoids Unicode powerline glyphs', () => {
@@ -221,8 +386,9 @@ test('renderDashboard ASCII mode avoids Unicode powerline glyphs', () => {
     provider: 'codex',
     viewMode: 'compact',
     claudeSessions,
-    claudeWeeklyData: weeklyData,
     codexData,
+    codexSummary,
+    period: '7d',
     cols: 100,
     ascii: true,
   });

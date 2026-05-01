@@ -5,6 +5,12 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
+import {
+  buildClaudeTurnUsage,
+  extractClaudeUserText,
+  isClaudeSyntheticUserMessage,
+  normalizeToolCall,
+} from './analytics.js';
 import { createScanIndex, readFileChunkSync } from './scan-index.js';
 
 const CLAUDE_SCAN_INDEX_VERSION = 2;
@@ -39,12 +45,16 @@ function safeReadJson(path) {
   }
 }
 
-function createClaudeUsageState() {
+function createClaudeUsageState(base = {}) {
   return {
+    sessionId: base.sessionId || null,
     model: 'unknown',
     latestTimestamp: null,
     latestUsage: {},
     timeline: [],
+    turns: Array.isArray(base.turns) ? [...base.turns] : [],
+    latestUserText: base.latestUserText || '',
+    turnIndex: base.turnIndex || 0,
     totals: {
       totalInput: 0,
       totalOutput: 0,
@@ -57,6 +67,16 @@ function createClaudeUsageState() {
       messageCount: 0,
     },
   };
+}
+
+function extractClaudeToolCalls(content = []) {
+  if (!Array.isArray(content)) return [];
+
+  return content.flatMap(item => {
+    if (!item || item.type !== 'tool_use' || !item.name) return [];
+    const command = item.name === 'Bash' ? item.input?.command || null : null;
+    return [normalizeToolCall(item.name, command)];
+  });
 }
 
 function pushClaudeTimelinePoint(timeline, timestamp, totalTokens) {
@@ -97,12 +117,34 @@ function parseClaudeUsageChunk(content, state = createClaudeUsageState()) {
     if (!line.trim()) continue;
     try {
       const msg = JSON.parse(line);
+      if (msg.type === 'user') {
+        const userText = extractClaudeUserText(msg.message?.content);
+        if (!msg.isMeta && userText && !isClaudeSyntheticUserMessage(userText)) {
+          state.latestUserText = userText.trim();
+        }
+        continue;
+      }
+
       if (msg.type !== 'assistant' || !msg.message?.usage) continue;
+
+      const timestamp = msg.timestamp || msg.message?.timestamp || null;
       applyClaudeUsageRecord(state, {
-        timestamp: msg.timestamp || msg.message?.timestamp || null,
+        timestamp,
         model: msg.message.model,
         usage: msg.message.usage,
       });
+
+      state.turns.push({
+        id: `claude:${state.sessionId || 'session'}:${timestamp || 'unknown'}:${state.turnIndex}`,
+        provider: 'claude',
+        sessionId: state.sessionId,
+        timestamp,
+        userText: state.latestUserText || '',
+        toolCalls: extractClaudeToolCalls(msg.message?.content),
+        usage: buildClaudeTurnUsage(msg.message.model, msg.message.usage),
+        isSidechain: Boolean(msg.isSidechain),
+      });
+      state.turnIndex += 1;
     } catch {
       // Skip malformed lines.
     }
@@ -157,6 +199,7 @@ function createClaudeSessionSnapshot(state = createClaudeUsageState()) {
     model: state.model || 'unknown',
     latestTimestamp: state.latestTimestamp || null,
     timeline: [...(state.timeline || [])],
+    turns: [...(state.turns || [])],
     context: computeContextBreakdown(state.latestUsage || {}),
     totals: {
       ...state.totals,
@@ -164,11 +207,14 @@ function createClaudeSessionSnapshot(state = createClaudeUsageState()) {
   };
 }
 
-function collectClaudeLogSnapshot(path, index = null) {
+function collectClaudeLogSnapshot(path, index = null, sessionId = null) {
   const stat = statSync(path);
 
   if (!index) {
-    return createClaudeSessionSnapshot(parseClaudeUsageChunk(readFileSync(path, 'utf8')));
+    return createClaudeSessionSnapshot(parseClaudeUsageChunk(
+      readFileSync(path, 'utf8'),
+      createClaudeUsageState({ sessionId }),
+    ));
   }
 
   const cachedEntry = index.getEntry(path);
@@ -178,15 +224,19 @@ function collectClaudeLogSnapshot(path, index = null) {
     return cachedEntry.payload.snapshot;
   }
 
-  let state = createClaudeUsageState();
+  let state = createClaudeUsageState({ sessionId });
   let startOffset = 0;
 
   if (status === 'append' && cachedEntry?.payload?.kind === 'claude-usage') {
     state = {
+      sessionId,
       model: cachedEntry.payload.snapshot.model || 'unknown',
       latestTimestamp: cachedEntry.payload.snapshot.latestTimestamp || null,
       latestUsage: cachedEntry.payload.latestUsage || {},
       timeline: [...(cachedEntry.payload.snapshot.timeline || [])],
+      turns: [...(cachedEntry.payload.snapshot.turns || [])],
+      latestUserText: cachedEntry.payload.latestUserText || '',
+      turnIndex: cachedEntry.payload.turnIndex || (cachedEntry.payload.snapshot.turns || []).length,
       totals: { ...cachedEntry.payload.snapshot.totals },
     };
     startOffset = cachedEntry.offset || cachedEntry.size || 0;
@@ -197,6 +247,8 @@ function collectClaudeLogSnapshot(path, index = null) {
   index.updateEntry(path, stat, {
     kind: 'claude-usage',
     latestUsage: state.latestUsage || {},
+    latestUserText: state.latestUserText || '',
+    turnIndex: state.turnIndex || 0,
     snapshot,
   }, {
     offset: stat.size,
@@ -273,7 +325,7 @@ export function collectSessions(opts = {}) {
     let snapshot = createClaudeSessionSnapshot();
 
     if (jsonlInfo) {
-      snapshot = collectClaudeLogSnapshot(jsonlInfo.path, scanIndex);
+      snapshot = collectClaudeLogSnapshot(jsonlInfo.path, scanIndex, meta.sessionId);
       projectName = projectDirToName(jsonlInfo.projectDir);
       touchedPaths.push(jsonlInfo.path);
     }
@@ -290,6 +342,7 @@ export function collectSessions(opts = {}) {
       model: snapshot.model,
       latestTimestamp: snapshot.latestTimestamp,
       timeline: snapshot.timeline || [],
+      turns: snapshot.turns || [],
       context: snapshot.context,
       totals: snapshot.totals,
     });
@@ -360,13 +413,18 @@ export function collectSessionsInRange(startMs, endMs, opts = {}) {
           const modified = stat.mtimeMs;
           if (modified < startMs || stat.birthtimeMs > endMs) continue;
 
-          const snapshot = collectClaudeLogSnapshot(fullPath, scanIndex);
+          const sessionId = basename(file, '.jsonl');
+          const snapshot = collectClaudeLogSnapshot(fullPath, scanIndex, sessionId);
           if (snapshot.totals.messageCount === 0) continue;
           touchedPaths.push(fullPath);
 
           results.push({
-            sessionId: basename(file, '.jsonl'),
+            sessionId,
             projectName: projectDirToName(dir.name),
+            model: snapshot.model,
+            latestTimestamp: snapshot.latestTimestamp,
+            context: snapshot.context,
+            turns: snapshot.turns || [],
             totals: snapshot.totals,
             fileModified: modified,
           });

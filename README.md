@@ -92,6 +92,13 @@ Standalone fullscreen options:
   --autoclear <min>      Auto-clear stale Claude sessions
   --view <mode>          compact | detail
   --budget <amount>      Budget target in USD
+
+Fullscreen detail controls:
+  [ / ]                  Switch provider tabs
+  , / .                  Cycle detail sub-tabs
+  s                      Open settings for the current provider
+  a g t m b d p          Toggle Activity / Scoring / Tools / MCP / Bash / Advisor / Period Summary
+  e                      Re-enable all analytics panels for the current provider
 ```
 
 ### Config file
@@ -162,6 +169,20 @@ tg --view detail
 tg --provider codex
 tg --budget 50
 ```
+
+In `detail` view, `tg` now keeps the main session overview visible while moving the longer analytics sections into sub-tabs:
+
+- `Overview`
+- `Activity`
+- `Scoring`
+- `Breakdown`
+- `Advisor`
+- `Summary`
+- `Settings`
+
+The `Scoring` sub-tab ranks chats in the selected reporting window by token and context efficiency per turn, making it easier to spot long threads that are doing useful work versus threads that are burning context for each exchange.
+
+The `Settings` sub-tab lets you enable or disable analytics sections independently for Claude and Codex. All analytics panels start enabled by default, and changes are saved back to `~/.config/token-gauge/config.json` so they persist across launches.
 
 ### Inline examples
 
@@ -264,6 +285,15 @@ This repo now includes an **experimental Go workspace**:
 It is intentionally not the default runtime yet. The Node.js implementation remains the reference behavior until Go collector, snapshot, inline, and TUI parity land.
 
 The Go workspace is there so contributors can start learning and porting the architecture in the planned sequence instead of waiting for a big-bang rewrite.
+
+For local staging, build the Go launcher and keep the Node behavior as a fallback:
+
+```sh
+./scripts/build-go-preview.sh
+./scripts/tg-local.sh --help
+```
+
+`scripts/tg-local.sh` prefers the staged Go binary at `.build/token-gauge-go`, and the Go binary delegates to `src/main.js` until native parity is ready.
 
 ## Requirements
 

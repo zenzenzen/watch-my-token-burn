@@ -1,6 +1,12 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
+import {
+  buildCodexTurnUsage,
+  extractParallelExecCommands,
+  normalizeToolCall,
+  parseJsonArgumentString,
+} from './analytics.js';
 import { basenameLabel, normalizeRateLimit } from './format.js';
 import { createScanIndex, readFileChunkSync } from './scan-index.js';
 
@@ -87,6 +93,18 @@ function parseTokenCount(payload) {
   return { info, rateLimits };
 }
 
+function diffTokenUsage(current = {}, previous = null) {
+  if (!previous) return current;
+
+  return {
+    input_tokens: Math.max(0, (current.input_tokens || 0) - (previous.input_tokens || 0)),
+    cached_input_tokens: Math.max(0, (current.cached_input_tokens || 0) - (previous.cached_input_tokens || 0)),
+    output_tokens: Math.max(0, (current.output_tokens || 0) - (previous.output_tokens || 0)),
+    reasoning_output_tokens: Math.max(0, (current.reasoning_output_tokens || 0) - (previous.reasoning_output_tokens || 0)),
+    total_tokens: Math.max(0, (current.total_tokens || 0) - (previous.total_tokens || 0)),
+  };
+}
+
 function createParsedCodexState(base = {}) {
   return {
     meta: base.meta || null,
@@ -94,6 +112,11 @@ function createParsedCodexState(base = {}) {
     tokenInfo: base.tokenInfo || null,
     rateLimits: base.rateLimits || null,
     timeline: Array.isArray(base.timeline) ? [...base.timeline] : [],
+    turns: Array.isArray(base.turns) ? [...base.turns] : [],
+    latestUserText: base.latestUserText || '',
+    pendingToolCalls: Array.isArray(base.pendingToolCalls) ? [...base.pendingToolCalls] : [],
+    previousTotalUsage: base.previousTotalUsage || null,
+    turnIndex: base.turnIndex || 0,
   };
 }
 
@@ -132,6 +155,30 @@ export function parseCodexSessionLog(content, base = {}) {
       continue;
     }
 
+    if (line.type === 'event_msg' && line.payload?.type === 'user_message') {
+      parsed.latestUserText = line.payload.message || parsed.latestUserText;
+      continue;
+    }
+
+    if (line.type === 'response_item' && line.payload?.type === 'function_call') {
+      const rawName = line.payload.name || '';
+      const name = rawName.replace(/^functions\./, '');
+      const argumentsJson = parseJsonArgumentString(line.payload.arguments);
+
+      if (name === 'parallel' || name === 'multi_tool_use.parallel') {
+        const nested = extractParallelExecCommands(line.payload.arguments);
+        parsed.pendingToolCalls.push(...nested);
+        continue;
+      }
+
+      const command = name === 'exec_command'
+        ? argumentsJson?.cmd || null
+        : null;
+
+      parsed.pendingToolCalls.push(normalizeToolCall(name, command));
+      continue;
+    }
+
     if (line.type === 'event_msg' && line.payload?.type === 'token_count') {
       const tokenCount = parseTokenCount(line.payload);
       if (tokenCount.info) parsed.tokenInfo = tokenCount.info;
@@ -139,6 +186,25 @@ export function parseCodexSessionLog(content, base = {}) {
       const totalTokens = tokenCount.info?.total_token_usage?.total_tokens;
       if (Number.isFinite(totalTokens)) {
         pushCodexTimelinePoint(parsed.timeline, line.timestamp || parsed.latestTimestamp, totalTokens);
+      }
+
+      if (tokenCount.info) {
+        const usageSource = tokenCount.info.last_token_usage
+          || diffTokenUsage(tokenCount.info.total_token_usage, parsed.previousTotalUsage);
+
+        parsed.turns.push({
+          id: `codex:${parsed.meta?.id || 'session'}:${line.timestamp || parsed.latestTimestamp || 'unknown'}:${parsed.turnIndex}`,
+          provider: 'codex',
+          sessionId: parsed.meta?.id || null,
+          timestamp: line.timestamp || parsed.latestTimestamp || null,
+          userText: parsed.latestUserText || '',
+          toolCalls: [...parsed.pendingToolCalls],
+          usage: buildCodexTurnUsage(usageSource),
+          isSidechain: false,
+        });
+        parsed.turnIndex += 1;
+        parsed.pendingToolCalls = [];
+        parsed.previousTotalUsage = tokenCount.info.total_token_usage || parsed.previousTotalUsage;
       }
     }
   }
@@ -283,6 +349,7 @@ function buildSessionRecord(parsed, indexEntry, filePath) {
         }
       : null,
     timeline: parsed.timeline || [],
+    turns: parsed.turns || [],
     liveDataFound: Boolean(parsed.tokenInfo || parsed.rateLimits),
     filePath,
   };
