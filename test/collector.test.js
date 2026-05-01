@@ -17,6 +17,11 @@ test('collectSessions normalizes Claude fixture data', () => {
   assert.equal(sessions[0].totals.totalTokens, 5500);
   assert.equal(sessions[0].totals.latestTotal, 3700);
   assert.equal(sessions[0].timeline.length, 2);
+  assert.equal(sessions[0].turns.length, 2);
+  assert.equal(sessions[0].turns[0].userText, 'run pytest and inspect the failure');
+  assert.equal(sessions[0].turns[0].toolCalls[0].name, 'Bash');
+  assert.equal(sessions[0].turns[1].userText, 'apply a fix to the flaky test');
+  assert.equal(sessions[0].turns[1].toolCalls[0].name, 'Edit');
   assert.equal(sessions[0].timeline[0].timestamp, '2026-04-03T10:00:00.000Z');
   assert.equal(sessions[0].timeline[1].totalTokens, 5500);
 });

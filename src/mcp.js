@@ -1,5 +1,6 @@
 import { collectStandaloneState } from './full-state.js';
 import {
+  normalizePeriod,
   normalizeProvider,
   normalizeViewMode,
   parseCliArgs,
@@ -45,6 +46,11 @@ function buildToolDefinition() {
           type: 'number',
           description: 'Optional budget target in USD.',
         },
+        period: {
+          type: 'string',
+          enum: ['today', '7d', '30d', 'month'],
+          description: 'Optional reporting window for summary and analytics.',
+        },
         cwd: {
           type: 'string',
           description: 'Optional current working directory used to resolve the active Codex session.',
@@ -75,6 +81,7 @@ export function buildStandaloneState(args = {}, opts = {}) {
   return (opts.collectStandaloneStateFn || collectStandaloneState)({
     provider: normalizeProvider(args.provider ?? defaultConfig.provider),
     viewMode: normalizeViewMode(args.viewMode ?? args.view ?? defaultConfig.viewMode),
+    period: normalizePeriod(args.period ?? defaultConfig.period),
     budget: parseBudget(args.budget, defaultConfig.budget || 0),
     aggregateDir,
   }, {

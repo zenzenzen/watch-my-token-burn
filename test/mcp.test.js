@@ -10,22 +10,25 @@ import {
 
 function createStubState(overrides = {}) {
   return {
-    version: 1,
+    version: 2,
     host: 'standalone',
     generatedAt: '2026-04-12T12:30:00.000Z',
     selectedProvider: 'codex',
     selectedViewMode: 'detail',
+    selectedPeriod: '7d',
     budget: 25,
     claude: {
       sessions: [],
       projectMetrics: [],
       rateLimits: null,
-      weekly: { totalTokens: 0 },
+      summary: { totalTokens: 0, window: { label: 'Last 7 days' } },
+      analytics: { categoryBreakdown: [] },
     },
     codex: {
       activeSession: { id: 'session-1' },
       recentThreads: [],
-      weekly: { totalTokens: 1000 },
+      summary: { totalTokens: 1000, window: { label: 'Last 7 days' } },
+      analytics: { categoryBreakdown: [] },
     },
     ...overrides,
   };
@@ -63,6 +66,7 @@ test('handleMcpRequest exposes initialize, tools, resource, and tool call result
   const collectStandaloneStateFn = config => createStubState({
     selectedProvider: config.provider,
     selectedViewMode: config.viewMode,
+    selectedPeriod: config.period,
     budget: config.budget,
   });
 
@@ -102,12 +106,14 @@ test('handleMcpRequest exposes initialize, tools, resource, and tool call result
       arguments: {
         provider: 'claude',
         viewMode: 'compact',
+        period: '30d',
         budget: 12.5,
       },
     },
   }, { collectStandaloneStateFn });
   assert.equal(toolCall.result.structuredContent.selectedProvider, 'claude');
   assert.equal(toolCall.result.structuredContent.selectedViewMode, 'compact');
+  assert.equal(toolCall.result.structuredContent.selectedPeriod, '30d');
   assert.equal(toolCall.result.structuredContent.budget, 12.5);
   assert.match(toolCall.result.content[0].text, /"selectedProvider": "claude"/);
 

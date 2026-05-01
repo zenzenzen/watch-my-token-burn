@@ -9,6 +9,7 @@ test('collectStandaloneState returns full standalone json state for both provide
   const state = collectStandaloneState({
     provider: 'claude',
     viewMode: 'detail',
+    period: '30d',
     budget: 50,
   }, {
     cwd: '/Users/dev/ai-gen-tooling',
@@ -50,20 +51,23 @@ test('collectStandaloneState returns full standalone json state for both provide
     },
   });
 
-  assert.equal(state.version, 1);
+  assert.equal(state.version, 2);
   assert.equal(state.host, 'standalone');
   assert.equal(state.generatedAt, '2026-04-12T10:00:00.000Z');
   assert.equal(state.selectedProvider, 'claude');
   assert.equal(state.selectedViewMode, 'detail');
+  assert.equal(state.selectedPeriod, '30d');
   assert.equal(state.budget, 50);
 
   assert.equal(state.claude.sessions.length, 1);
   assert.equal(state.claude.projectMetrics.length, 2);
   assert.equal(state.claude.rateLimits, null);
-  assert.equal(state.claude.weekly.totalTokens, 5500);
-  assert.equal(state.claude.weekly.billedCost, 0.6);
+  assert.equal(state.claude.summary.totalTokens, 5500);
+  assert.equal(state.claude.summary.billedCost, 0.6);
+  assert.equal(state.claude.analytics.categoryBreakdown.find(row => row.category === 'testing').turns, 1);
 
   assert.equal(state.codex.activeSession.id, 'cccccccc-4444-5555-6666-dddddddddddd');
   assert.equal(state.codex.recentThreads.length, 2);
-  assert.equal(state.codex.weekly.totalTokens, 83100);
+  assert.equal(state.codex.summary.totalTokens, 83100);
+  assert.equal(state.codex.analytics.toolBreakdown[0].tool, 'exec_command');
 });
