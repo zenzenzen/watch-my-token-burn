@@ -53,7 +53,9 @@ run_cmd() {
 }
 
 resolve_command() {
-  if command -v tg >/dev/null 2>&1; then
+  if [[ -x "${REPO_DIR}/scripts/tg-local.sh" ]]; then
+    printf '%s/scripts/tg-local.sh' "${REPO_DIR}"
+  elif command -v tg >/dev/null 2>&1; then
     printf 'tg'
   elif command -v token-gauge >/dev/null 2>&1; then
     printf 'token-gauge'
